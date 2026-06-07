@@ -10,11 +10,9 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Iterable
 
-from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template, request
 
 BASE_DIR = Path(__file__).resolve().parent
-load_dotenv(BASE_DIR / ".env")
 
 try:
     import paho.mqtt.client as mqtt
@@ -25,11 +23,11 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
 
 # -----------------------------------------------------------------------------
-# APP CONFIG (.env)
+# APP CONFIG
 # -----------------------------------------------------------------------------
-# Copy/edit .env when moving from laptop preview to Raspberry Pi. Environment
-# variables still override values in .env, so deployment scripts can customize
-# settings without changing code.
+# Code defaults are enough to run directly on Raspberry Pi. Optional OS
+# environment variables can still override values for temporary testing, e.g.
+# APP_PORT=5001 python app.py. No .env file is required.
 # -----------------------------------------------------------------------------
 
 FALSE_VALUES = {"0", "false", "off", "no"}
@@ -1223,6 +1221,6 @@ if __name__ == "__main__":
     # host="0.0.0.0" lets the dashboard be reached from another device on the
     # Raspberry Pi network: http://RASPBERRY_PI_IP:5000
     # Default port is 5000 as requested. If macOS AirPlay/Control Center already
-    # uses port 5000 during local development, set APP_PORT=5001 in .env or run:
+    # uses port 5000 during local development, run:
     # APP_PORT=5001 python app.py
     app.run(host=APP_HOST, port=APP_PORT, debug=APP_DEBUG)

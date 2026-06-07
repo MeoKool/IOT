@@ -3,8 +3,7 @@ __pycache__/
 *.py[cod]
 .DS_Store
 
-# Local runtime/config files
-.env
+# Local runtime files
 *.db
 *.sqlite
 *.sqlite3
