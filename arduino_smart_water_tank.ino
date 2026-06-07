@@ -1,80 +1,222 @@
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
-#include "DHT.h"
+#include <DHT.h>
 #include <Servo.h>
 
-// ================= CẤU HÌNH CHÂN =================
+// =====================================================
+// SMART WATER TANK - ARDUINO UNO
+// Arduino -> Raspberry Pi: USB Serial CSV
+// Raspberry Pi -> Arduino: Serial command '1' / '0'
+//
+// CSV format sent every 2 seconds:
+// temperature,humidity,water_percent,is_pumping,water_raw
+// Example:
+// 28.5,70.2,45,1,460
+// =====================================================
+
+// ================= PIN CONFIG =================
 #define WATER_PIN A0
-#define DHTPIN 2
-#define DHTTYPE DHT22
-#define PUMP_LED 3
-#define BUZZER 4
+#define DHT_PIN 2
+#define DHT_TYPE DHT22
+
+#define PUMP_LED_PIN 3
+#define BUZZER_PIN 4
 #define SERVO_PIN 5
-#define ALARM_LED 6
+#define ALARM_LED_PIN 6
 
-// ================= HIỆU CHUẨN CẢM BIẾN =================
-const int MIN_WATER_RAW = 350;  // 0%
-const int MAX_WATER_RAW = 580;  // 100%
+// ================= WATER SENSOR CALIBRATION =================
+// Adjust these values after testing your real water sensor.
+// Read water_raw from Serial/LCD when tank is empty/full.
+const int MIN_WATER_RAW = 350;   // 0% water
+const int MAX_WATER_RAW = 580;   // 100% water
 
-DHT dht(DHTPIN, DHTTYPE);
+// ================= THRESHOLDS =================
+const int LOW_WATER_THRESHOLD = 10;       // Auto pump ON below 10%
+const int STOP_PUMP_THRESHOLD = 85;       // Auto pump OFF at/above 85%
+const int OVERFLOW_THRESHOLD = 90;        // Alarm above 90%
+
+// ================= TIMING =================
+const unsigned long WATER_READ_INTERVAL = 100;    // 0.1 second
+const unsigned long DATA_SEND_INTERVAL = 2000;    // 2 seconds
+const unsigned long SERVO_INTERVAL = 30;          // servo animation speed
+const unsigned long ALARM_INTERVAL = 500;         // alarm blink speed
+
+unsigned long lastWaterReadMillis = 0;
+unsigned long lastDataSendMillis = 0;
+unsigned long lastServoMillis = 0;
+unsigned long lastAlarmMillis = 0;
+
+// ================= DEVICES =================
+DHT dht(DHT_PIN, DHT_TYPE);
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 Servo pumpServo;
 
-// ================= BỘ ĐỊNH TUYẾN THỜI GIAN =================
-unsigned long previousWaterMillis = 0;
-const unsigned long waterInterval = 100;      // đọc nước 0.1 giây/lần
-
-unsigned long previousDhtMillis = 0;
-const unsigned long dhtInterval = 2000;       // gửi dữ liệu lên Raspberry Pi 2 giây/lần
-
-unsigned long previousServoMillis = 0;        // luồng motor servo
-int servoPos = 0;
-int servoStep = 15;
-
-unsigned long previousAlarmMillis = 0;        // luồng báo động tràn
-const unsigned long alarmInterval = 1000;
+// ================= STATE =================
+bool isPumping = false;
 bool alarmState = false;
 
-// ================= BIẾN TOÀN CỤC =================
-bool isPumping = false;
-int waterPercent = 0;
 int waterRaw = 0;
+int waterPercent = 0;
 
+int servoPosition = 0;
+int servoStep = 15;
+
+// =====================================================
+// Read command from Raspberry Pi
+// '1' = pump ON
+// '0' = pump OFF
+// =====================================================
 void handleSerialCommand() {
   while (Serial.available() > 0) {
-    char cmd = Serial.read();
+    char command = Serial.read();
 
-    // Raspberry Pi bridge gửi '1' bật bơm, '0' tắt bơm.
-    // Nếu sau này gửi P1/P0 thì vẫn bắt ký tự 1/0 được.
-    if (cmd == '1') {
-      if (waterPercent < 85) {
+    if (command == '1') {
+      if (waterPercent < STOP_PUMP_THRESHOLD) {
         isPumping = true;
       }
-    } else if (cmd == '0') {
+    } else if (command == '0') {
       isPumping = false;
     }
   }
 }
 
+// =====================================================
+// Convert analog water sensor value to percent
+// =====================================================
+int readWaterPercent() {
+  waterRaw = analogRead(WATER_PIN);
+
+  long percent = map(waterRaw, MIN_WATER_RAW, MAX_WATER_RAW, 0, 100);
+  percent = constrain(percent, 0, 100);
+
+  return (int)percent;
+}
+
+// =====================================================
+// Automatic pump safety logic
+// =====================================================
+void updatePumpAutoLogic() {
+  if (waterPercent < LOW_WATER_THRESHOLD) {
+    isPumping = true;
+  }
+
+  if (waterPercent >= STOP_PUMP_THRESHOLD) {
+    isPumping = false;
+  }
+}
+
+// =====================================================
+// Update LCD display
+// =====================================================
+void updateLcd(float temperature, float humidity, bool dhtOk) {
+  lcd.setCursor(0, 0);
+
+  if (dhtOk) {
+    lcd.print("T:");
+    lcd.print(temperature, 1);
+    lcd.print("C H:");
+    lcd.print(humidity, 0);
+    lcd.print("%   ");
+  } else {
+    lcd.print("DHT22 Error     ");
+  }
+
+  lcd.setCursor(0, 1);
+  lcd.print("W:");
+  lcd.print(waterPercent);
+  lcd.print("% P:");
+  lcd.print(isPumping ? "ON " : "OFF");
+  lcd.print(" R:");
+  lcd.print(waterRaw);
+  lcd.print("   ");
+}
+
+// =====================================================
+// Send clean CSV line to Raspberry Pi bridge
+// Do not print debug text to Serial, because bridge parses CSV.
+// =====================================================
+void sendDataToRaspberryPi(float temperature, float humidity) {
+  Serial.print(temperature, 1);
+  Serial.print(",");
+  Serial.print(humidity, 1);
+  Serial.print(",");
+  Serial.print(waterPercent);
+  Serial.print(",");
+  Serial.print(isPumping ? 1 : 0);
+  Serial.print(",");
+  Serial.println(waterRaw);
+}
+
+// =====================================================
+// Pump output: LED + servo animation
+// =====================================================
+void updatePumpOutput(unsigned long currentMillis) {
+  if (isPumping) {
+    digitalWrite(PUMP_LED_PIN, HIGH);
+
+    if (currentMillis - lastServoMillis >= SERVO_INTERVAL) {
+      lastServoMillis = currentMillis;
+
+      servoPosition += servoStep;
+
+      if (servoPosition >= 180) {
+        servoPosition = 180;
+        servoStep = -servoStep;
+      } else if (servoPosition <= 0) {
+        servoPosition = 0;
+        servoStep = -servoStep;
+      }
+
+      pumpServo.write(servoPosition);
+    }
+  } else {
+    digitalWrite(PUMP_LED_PIN, LOW);
+    servoPosition = 0;
+    servoStep = abs(servoStep);
+    pumpServo.write(0);
+  }
+}
+
+// =====================================================
+// Overflow alarm: buzzer + LED blink
+// =====================================================
+void updateAlarmOutput(unsigned long currentMillis) {
+  if (waterPercent > OVERFLOW_THRESHOLD) {
+    if (currentMillis - lastAlarmMillis >= ALARM_INTERVAL) {
+      lastAlarmMillis = currentMillis;
+      alarmState = !alarmState;
+
+      digitalWrite(ALARM_LED_PIN, alarmState ? HIGH : LOW);
+      digitalWrite(BUZZER_PIN, alarmState ? HIGH : LOW);
+    }
+  } else {
+    alarmState = false;
+    digitalWrite(ALARM_LED_PIN, LOW);
+    digitalWrite(BUZZER_PIN, LOW);
+  }
+}
+
 void setup() {
   Serial.begin(9600);
+
   pinMode(WATER_PIN, INPUT);
+  pinMode(PUMP_LED_PIN, OUTPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(ALARM_LED_PIN, OUTPUT);
+
+  digitalWrite(PUMP_LED_PIN, LOW);
+  digitalWrite(BUZZER_PIN, LOW);
+  digitalWrite(ALARM_LED_PIN, LOW);
+
   dht.begin();
 
   lcd.init();
   lcd.backlight();
+  lcd.clear();
   lcd.setCursor(0, 0);
   lcd.print("Smart WaterTank");
   lcd.setCursor(0, 1);
   lcd.print("Starting...");
-
-  pinMode(PUMP_LED, OUTPUT);
-  pinMode(BUZZER, OUTPUT);
-  pinMode(ALARM_LED, OUTPUT);
-
-  digitalWrite(PUMP_LED, LOW);
-  digitalWrite(BUZZER, LOW);
-  digitalWrite(ALARM_LED, LOW);
 
   pumpServo.attach(SERVO_PIN);
   pumpServo.write(0);
@@ -86,78 +228,32 @@ void setup() {
 void loop() {
   unsigned long currentMillis = millis();
 
-  // 1. NHẬN LỆNH TỪ RASPBERRY PI / WEB DASHBOARD
+  // 1. Receive manual command from Raspberry Pi/dashboard
   handleSerialCommand();
 
-  // 2. LUỒNG 0.1 GIÂY: ĐỌC NƯỚC & ĐIỀU KHIỂN BƠM
-  if (currentMillis - previousWaterMillis >= waterInterval) {
-    previousWaterMillis = currentMillis;
-
-    waterRaw = analogRead(WATER_PIN);
-    waterPercent = map(waterRaw, MIN_WATER_RAW, MAX_WATER_RAW, 0, 100);
-    waterPercent = constrain(waterPercent, 0, 100);
-
-    // Auto chống cạn/chống tràn
-    if (waterPercent < 10 && !isPumping) {
-      isPumping = true;
-    }
-    if (waterPercent >= 85 && isPumping) {
-      isPumping = false;
-    }
-
-    lcd.setCursor(0, 1);
-    lcd.print("Water:");
-    lcd.print(waterPercent);
-    lcd.print("%    ");
+  // 2. Read water sensor quickly
+  if (currentMillis - lastWaterReadMillis >= WATER_READ_INTERVAL) {
+    lastWaterReadMillis = currentMillis;
+    waterPercent = readWaterPercent();
+    updatePumpAutoLogic();
   }
 
-  // 3. LUỒNG 2 GIÂY: ĐỌC DHT22 & GỬI CSV LÊN RASPBERRY PI
-  if (currentMillis - previousDhtMillis >= dhtInterval) {
-    previousDhtMillis = currentMillis;
+  // 3. Read DHT22 and send data every 2 seconds
+  if (currentMillis - lastDataSendMillis >= DATA_SEND_INTERVAL) {
+    lastDataSendMillis = currentMillis;
 
-    float t = dht.readTemperature();
-    float h = dht.readHumidity();
+    float temperature = dht.readTemperature();
+    float humidity = dht.readHumidity();
+    bool dhtOk = !isnan(temperature) && !isnan(humidity);
 
-    if (!isnan(t) && !isnan(h)) {
-      // Format bridge đang đọc:
-      // temperature,humidity,water_percent,is_pumping,water_raw
-      Serial.print(t, 1); Serial.print(",");
-      Serial.print(h, 1); Serial.print(",");
-      Serial.print(waterPercent); Serial.print(",");
-      Serial.print(isPumping ? 1 : 0); Serial.print(",");
-      Serial.println(waterRaw);
-
-      lcd.setCursor(0, 0);
-      lcd.print("T:"); lcd.print(t, 1); lcd.print("C H:"); lcd.print(h, 0); lcd.print("% ");
+    if (dhtOk) {
+      sendDataToRaspberryPi(temperature, humidity);
     }
+
+    updateLcd(temperature, humidity, dhtOk);
   }
 
-  // 4. LUỒNG THỰC THI: MÁY BƠM (SERVO + LED)
-  if (isPumping) {
-    digitalWrite(PUMP_LED, HIGH);
-    if (currentMillis - previousServoMillis > 30) {
-      previousServoMillis = currentMillis;
-      servoPos += servoStep;
-      if (servoPos >= 180 || servoPos <= 0) {
-        servoStep = -servoStep;
-      }
-      pumpServo.write(servoPos);
-    }
-  } else {
-    digitalWrite(PUMP_LED, LOW);
-  }
-
-  // 5. LUỒNG BÁO ĐỘNG TRÀN (> 90%)
-  if (waterPercent > 90) {
-    if (currentMillis - previousAlarmMillis >= alarmInterval) {
-      previousAlarmMillis = currentMillis;
-      alarmState = !alarmState;
-      digitalWrite(ALARM_LED, alarmState ? HIGH : LOW);
-      digitalWrite(BUZZER, alarmState ? HIGH : LOW);
-    }
-  } else {
-    digitalWrite(ALARM_LED, LOW);
-    digitalWrite(BUZZER, LOW);
-    alarmState = false;
-  }
+  // 4. Update pump and alarm outputs continuously
+  updatePumpOutput(currentMillis);
+  updateAlarmOutput(currentMillis);
 }

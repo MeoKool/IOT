@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import atexit
 import os
 import json
 import logging
 import sqlite3
+import subprocess
+import sys
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -97,6 +100,11 @@ MQTT_TOPIC_ALERT = os.environ.get("MQTT_TOPIC_ALERT", "tank/alert")
 MQTT_SUBSCRIBE_TOPICS = tuple(
     dict.fromkeys([MQTT_TOPIC_SENSOR, MQTT_TOPIC_DATA, MQTT_TOPIC_ALERT, MQTT_TOPIC_LOG])
 )
+
+# Start serial_api_bridge.py alongside Flask when running `python app.py`.
+SERIAL_BRIDGE_ENABLED = env_bool("SERIAL_BRIDGE_ENABLED", True)
+SERIAL_BRIDGE_SCRIPT = BASE_DIR / "serial_api_bridge.py"
+serial_bridge_process: subprocess.Popen | None = None
 
 COMMAND_TO_ARDUINO_CODE = {
     "PUMP_ON": "P1",
@@ -835,6 +843,66 @@ def start_mqtt_client() -> None:
         except Exception as exc:
             _set_mqtt_status(connected=False, last_error=f"MQTT startup error: {exc}")
             logging.warning("MQTT startup error: %s", exc)
+
+
+def start_serial_bridge() -> None:
+    """Launch serial_api_bridge.py as a child process for Arduino Serial I/O."""
+    global serial_bridge_process
+    if not SERIAL_BRIDGE_ENABLED:
+        logging.info("Serial bridge disabled (SERIAL_BRIDGE_ENABLED=false)")
+        return
+    if not SERIAL_BRIDGE_SCRIPT.is_file():
+        logging.warning("serial_api_bridge.py not found; skipping serial bridge")
+        return
+    if serial_bridge_process is not None and serial_bridge_process.poll() is None:
+        return
+
+    cmd = [
+        sys.executable,
+        str(SERIAL_BRIDGE_SCRIPT),
+        "--no-api-post",
+        "--mqtt-host",
+        MQTT_HOST,
+        "--mqtt-port",
+        str(MQTT_PORT),
+        "--mqtt-sensor-topic",
+        MQTT_TOPIC_SENSOR,
+        "--mqtt-control-topic",
+        MQTT_TOPIC_CONTROL,
+    ]
+    serial_port = os.environ.get("SERIAL_PORT")
+    if serial_port:
+        cmd.extend(["--serial-port", serial_port])
+
+    try:
+        serial_bridge_process = subprocess.Popen(cmd, cwd=str(BASE_DIR))
+        logging.info(
+            "Serial bridge started (pid=%s, port=%s)",
+            serial_bridge_process.pid,
+            serial_port or "/dev/ttyS0",
+        )
+        atexit.register(stop_serial_bridge)
+    except Exception as exc:
+        logging.warning("Serial bridge startup error: %s", exc)
+
+
+def stop_serial_bridge() -> None:
+    """Terminate the background serial bridge process."""
+    global serial_bridge_process
+    if serial_bridge_process is None:
+        return
+    if serial_bridge_process.poll() is not None:
+        serial_bridge_process = None
+        return
+
+    serial_bridge_process.terminate()
+    try:
+        serial_bridge_process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        serial_bridge_process.kill()
+        serial_bridge_process.wait(timeout=2)
+    logging.info("Serial bridge stopped")
+    serial_bridge_process = None
 
 
 def mqtt_publish_json(topic: str, payload: Dict[str, object]) -> Dict[str, object]:
@@ -1876,6 +1944,14 @@ if __name__ == "__main__":
     # Raspberry Pi network: http://RASPBERRY_PI_IP:5001
     # Default port is 5001. If another process already uses port 5001, run:
     # APP_PORT=5002 python app.py
-    app.run(
-        host=APP_HOST, port=APP_PORT, debug=APP_DEBUG, threaded=True, use_reloader=False
-    )
+    start_serial_bridge()
+    try:
+        app.run(
+            host=APP_HOST,
+            port=APP_PORT,
+            debug=APP_DEBUG,
+            threaded=True,
+            use_reloader=False,
+        )
+    finally:
+        stop_serial_bridge()
