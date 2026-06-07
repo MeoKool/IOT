@@ -10,11 +10,13 @@ const historyState = {
     totalRecords: 0,
 };
 
+// The backend keeps the earlier generic chart keys for compatibility, but the
+// UI presents them as water-tank signals.
 const chartThemes = {
-    temperature: { label: "Temperature (°C)", border: "#dd5b00", fill: "rgba(221, 91, 0, 0.08)" },
-    humidity: { label: "Humidity (%)", border: "#62aef0", fill: "rgba(98, 174, 240, 0.10)" },
-    light: { label: "Light Level", border: "#0075de", fill: "rgba(0, 117, 222, 0.08)" },
-    distance: { label: "Distance (cm)", border: "#2a9d99", fill: "rgba(42, 157, 153, 0.09)" },
+    temperature: { label: "Water Level (%)", border: "#0ea5e9", fill: "rgba(14, 165, 233, 0.10)" },
+    humidity: { label: "Backup Float (%)", border: "#14b8a6", fill: "rgba(20, 184, 166, 0.10)" },
+    light: { label: "Analog A0", border: "#f59e0b", fill: "rgba(245, 158, 11, 0.10)" },
+    distance: { label: "Ultrasonic Distance (cm)", border: "#8b5cf6", fill: "rgba(139, 92, 246, 0.10)" },
 };
 
 function $(id) {
@@ -22,8 +24,6 @@ function $(id) {
 }
 
 function renderLucideIcons() {
-    // Lucide is loaded from CDN in index.html. If the network is unavailable,
-    // the dashboard still works and simply falls back to plain text/layout.
     if (window.lucide?.createIcons) {
         window.lucide.createIcons({
             attrs: {
@@ -34,26 +34,55 @@ function renderLucideIcons() {
     }
 }
 
+function readWaterLevel(data) {
+    return Number(data.water_level ?? data.temperature ?? 0);
+}
+
+function readFloatLevel(data) {
+    return Number(data.float_level ?? data.humidity ?? 0);
+}
+
+function readAnalogValue(data) {
+    return Number(data.analog_value ?? data.light ?? 0);
+}
+
+function readDistance(data) {
+    return Number(data.distance_cm ?? data.distance ?? 0);
+}
+
+function readValveStatus(data) {
+    return data.valve_status ?? data.door_status ?? "CLOSED";
+}
+
+function readPumpStatus(data) {
+    return data.pump_status ?? data.led_status ?? "OFF";
+}
+
+function readAlarmStatus(data) {
+    return data.alarm_status ?? data.buzzer_status ?? "OFF";
+}
+
 function statusTextForSensor(type, value) {
     switch (type) {
-        case "temperature":
-            if (value >= 30) return "Warm room temperature";
-            if (value <= 25) return "Cool and comfortable";
-            return "Comfort range";
-        case "humidity":
-            if (value >= 72) return "High humidity";
-            if (value <= 58) return "Dry air level";
-            return "Normal humidity";
-        case "light":
-            if (value >= 600) return "Bright environment";
-            if (value <= 260) return "Low light detected";
-            return "Balanced light level";
+        case "waterLevel":
+            if (value >= 95) return "Overflow risk — alarm threshold";
+            if (value >= 80) return "Tank nearly full";
+            if (value <= 15) return "Low level — pump should refill";
+            return "Safe operating level";
+        case "floatLevel":
+            if (value >= 95) return "Backup float confirms high level";
+            if (value <= 15) return "Backup float confirms low level";
+            return "Backup confirmation normal";
+        case "analog":
+            if (value >= 900) return "Analog value near full scale";
+            if (value <= 160) return "Analog value near empty";
+            return "Analog A0 in normal range";
         case "distance":
-            if (value <= 15) return "Object is very close";
-            if (value >= 45) return "Object is far";
-            return "Safe distance";
+            if (value <= 8) return "Water surface close to sensor";
+            if (value >= 42) return "Water surface far from sensor";
+            return "Ultrasonic distance stable";
         default:
-            return "Live mock value";
+            return "Live water-tank value";
     }
 }
 
@@ -69,18 +98,22 @@ function boolModeLabel(autoMode) {
     return autoMode ? "ON" : "OFF";
 }
 
+const TOAST_AUTO_CLOSE_MS = 3000;
+
 function showToast(message, type = "success") {
     const container = $("toastContainer");
+    if (!container) return;
+
     const toast = document.createElement("div");
     toast.className = `toast ${type === "error" ? "error" : ""}`;
     toast.textContent = message;
     container.appendChild(toast);
 
+    // Toast stays visible for 3 seconds, then fades out and removes itself.
     window.setTimeout(() => {
-        toast.style.opacity = "0";
-        toast.style.transform = "translateY(10px) scale(0.98)";
-        toast.addEventListener("transitionend", () => toast.remove(), { once: true });
-    }, 2800);
+        toast.classList.add("is-hiding");
+        window.setTimeout(() => toast.remove(), 260);
+    }, TOAST_AUTO_CLOSE_MS);
 }
 
 async function fetchJSON(url, options = {}) {
@@ -104,30 +137,38 @@ function setToggleState(id, checked, text) {
 }
 
 function updateCurrentUI(data) {
-    $("temperatureValue").textContent = data.temperature.toFixed ? data.temperature.toFixed(1) : data.temperature;
-    $("humidityValue").textContent = data.humidity;
-    $("lightValue").textContent = data.light;
-    $("distanceValue").textContent = data.distance;
+    const waterLevel = readWaterLevel(data);
+    const floatLevel = readFloatLevel(data);
+    const analogValue = readAnalogValue(data);
+    const distance = readDistance(data);
+    const valveStatus = readValveStatus(data);
+    const pumpStatus = readPumpStatus(data);
+    const alarmStatus = readAlarmStatus(data);
 
-    $("temperatureStatus").textContent = statusTextForSensor("temperature", Number(data.temperature));
-    $("humidityStatus").textContent = statusTextForSensor("humidity", Number(data.humidity));
-    $("lightStatus").textContent = statusTextForSensor("light", Number(data.light));
-    $("distanceStatus").textContent = statusTextForSensor("distance", Number(data.distance));
+    $("temperatureValue").textContent = waterLevel.toFixed ? waterLevel.toFixed(1) : waterLevel;
+    $("humidityValue").textContent = floatLevel;
+    $("lightValue").textContent = analogValue;
+    $("distanceValue").textContent = distance;
 
-    $("doorValue").textContent = data.door_status;
-    $("ledValue").textContent = data.led_status;
-    $("buzzerValue").textContent = data.buzzer_status;
+    $("temperatureStatus").textContent = statusTextForSensor("waterLevel", waterLevel);
+    $("humidityStatus").textContent = statusTextForSensor("floatLevel", floatLevel);
+    $("lightStatus").textContent = statusTextForSensor("analog", analogValue);
+    $("distanceStatus").textContent = statusTextForSensor("distance", distance);
+
+    $("doorValue").textContent = valveStatus;
+    $("ledValue").textContent = pumpStatus;
+    $("buzzerValue").textContent = alarmStatus;
     $("autoValue").textContent = boolModeLabel(data.auto_mode);
 
-    $("doorStatus").textContent = data.door_status === "OPEN" ? "Door is currently open" : "Door is currently closed";
-    $("ledStatus").textContent = data.led_status === "ON" ? "Lighting output enabled" : "Lighting output disabled";
-    $("buzzerStatus").textContent = data.buzzer_status === "ON" ? "Alert sound enabled" : "Alert sound disabled";
-    $("autoStatus").textContent = data.auto_mode ? "Automatic decisions enabled" : "Manual control enabled";
+    $("doorStatus").textContent = valveStatus === "OPEN" ? "Valve is open" : "Valve is closed";
+    $("ledStatus").textContent = pumpStatus === "ON" ? "Pump output enabled" : "Pump output disabled";
+    $("buzzerStatus").textContent = alarmStatus === "ON" ? "Overflow alarm active" : "Alarm output disabled";
+    $("autoStatus").textContent = data.auto_mode ? "Automatic tank logic enabled" : "Manual tank control enabled";
 
-    setToggleState("ledToggle", data.led_status === "ON", data.led_status === "ON" ? "ON — lighting output enabled" : "OFF — lighting output disabled");
-    setToggleState("buzzerToggle", data.buzzer_status === "ON", data.buzzer_status === "ON" ? "ON — alert sound enabled" : "OFF — alert sound disabled");
-    setToggleState("doorToggle", data.door_status === "OPEN", data.door_status === "OPEN" ? "OPEN — servo door open" : "CLOSED — servo door closed");
-    setToggleState("autoToggle", Boolean(data.auto_mode), data.auto_mode ? "ON — automatic decisions" : "OFF — manual control");
+    setToggleState("ledToggle", pumpStatus === "ON", pumpStatus === "ON" ? "ON — pump running" : "OFF — pump stopped");
+    setToggleState("buzzerToggle", alarmStatus === "ON", alarmStatus === "ON" ? "ON — alarm active" : "OFF — alarm standby");
+    setToggleState("doorToggle", valveStatus === "OPEN", valveStatus === "OPEN" ? "OPEN — valve/servo open" : "CLOSED — valve/servo closed");
+    setToggleState("autoToggle", Boolean(data.auto_mode), data.auto_mode ? "ON — automatic tank logic" : "OFF — manual tank control");
 
     $("connectionBadge").textContent = data.connection;
     $("lastUpdated").textContent = data.last_updated;
@@ -165,7 +206,6 @@ async function loadMqttStatus() {
             statusBadge.title = status.last_error || "MQTT broker status";
         }
     } catch (error) {
-        // Keep the dashboard usable even if the status endpoint is unreachable.
         console.warn("MQTT status unavailable:", error.message);
     }
 }
@@ -220,7 +260,8 @@ function createChart(canvasId, key) {
                     grid: { color: "rgba(0, 0, 0, 0.045)" },
                 },
                 y: {
-                    beginAtZero: key === "light" || key === "distance",
+                    beginAtZero: true,
+                    suggestedMax: key === "light" ? 1023 : key === "distance" ? 50 : 100,
                     ticks: { color: "#615d59" },
                     grid: { color: "rgba(0, 0, 0, 0.045)" },
                 },
@@ -302,13 +343,13 @@ function renderHistory(records, meta = {}) {
         return `
             <tr>
                 <td>${record.time}</td>
-                <td>${record.temperature} °C</td>
-                <td>${record.humidity}%</td>
-                <td>${record.light}</td>
-                <td>${record.distance} cm</td>
-                <td>${onOffBadge(record.door_status)}</td>
-                <td>${onOffBadge(record.led_status)}</td>
-                <td>${onOffBadge(record.buzzer_status)}</td>
+                <td>${Number(record.water_level ?? record.temperature).toFixed(1)}%</td>
+                <td>${record.float_level ?? record.humidity}%</td>
+                <td>${record.analog_value ?? record.light}</td>
+                <td>${record.distance_cm ?? record.distance} cm</td>
+                <td>${onOffBadge(record.valve_status ?? record.door_status)}</td>
+                <td>${onOffBadge(record.pump_status ?? record.led_status)}</td>
+                <td>${onOffBadge(record.alarm_status ?? record.buzzer_status)}</td>
                 <td>${onOffBadge(autoText)}</td>
             </tr>
         `;
@@ -323,7 +364,6 @@ async function loadHistory() {
         });
         const data = await fetchJSON(`/api/history?${params.toString()}`);
 
-        // Backward compatible fallback if an older backend returns a raw array.
         if (Array.isArray(data)) {
             renderHistory(data, {
                 page: 1,
@@ -360,6 +400,7 @@ async function sendControlCommand(command) {
         await Promise.all([loadHistory(), loadChartData()]);
     } catch (error) {
         showToast(error.message, "error");
+        throw error;
     }
 }
 
@@ -370,26 +411,25 @@ async function sendAutoMode(auto) {
             body: JSON.stringify({ auto }),
         });
 
-        showToast(result.message || (auto ? "Auto mode enabled" : "Auto mode disabled"));
+        showToast(result.message || (auto ? "Auto tank mode enabled" : "Manual tank mode enabled"));
         if (result.data) updateCurrentUI(result.data);
         await Promise.all([loadHistory(), loadChartData()]);
     } catch (error) {
         showToast(error.message, "error");
+        throw error;
     }
 }
 
 function bindControls() {
     const toggleCommands = {
-        led: (checked) => checked ? "LED_ON" : "LED_OFF",
-        buzzer: (checked) => checked ? "BUZZER_ON" : "BUZZER_OFF",
-        door: (checked) => checked ? "DOOR_OPEN" : "DOOR_CLOSE",
+        led: (checked) => checked ? "PUMP_ON" : "PUMP_OFF",
+        buzzer: (checked) => checked ? "ALARM_ON" : "ALARM_OFF",
+        door: (checked) => checked ? "VALVE_OPEN" : "VALVE_CLOSE",
     };
 
     document.querySelectorAll("[data-toggle-control]").forEach((toggle) => {
         const card = toggle.closest(".control-toggle");
 
-        // Make the whole card behave like a switch, not just the hidden checkbox.
-        // preventDefault avoids the browser label's native double-toggle behavior.
         card?.addEventListener("click", (event) => {
             if (event.target === toggle || toggle.disabled) return;
             event.preventDefault();
@@ -408,8 +448,6 @@ function bindControls() {
                     await sendControlCommand(toggleCommands[control](toggle.checked));
                 }
             } catch (error) {
-                // sendControlCommand/sendAutoMode already show the toast. Refreshing here
-                // restores the switch to the persisted backend state if a request fails.
                 await loadCurrent();
             } finally {
                 toggle.disabled = false;
@@ -449,8 +487,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     bindHistoryPagination();
     await refreshDashboard();
 
-    // UI-only polling for the mock dashboard. Later, this can be replaced by
-    // Server-Sent Events/WebSocket, or backed by real SQLite rows written by the
-    // Raspberry Pi Bluetooth/Serial ingestion process.
+    // UI-only polling for the mock water-tank dashboard. Later this can be
+    // replaced by Server-Sent Events/WebSocket, or backed by real SQLite rows
+    // written by Raspberry Pi Bluetooth/Serial/MQTT ingestion.
     window.setInterval(refreshDashboard, REFRESH_INTERVAL_MS);
 });

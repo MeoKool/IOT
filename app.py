@@ -70,7 +70,7 @@ REFRESH_INTERVAL_MS = int(UPDATE_INTERVAL_SECONDS * 1000)
 CHART_MAX_POINTS = max(1, env_int("CHART_MAX_POINTS", 20))
 HISTORY_DEFAULT_PER_PAGE = max(1, min(env_int("HISTORY_DEFAULT_PER_PAGE", 20), 100))
 DATABASE_PATH = resolve_path(
-    os.environ.get("DATABASE_PATH"), BASE_DIR / "smart_room.db"
+    os.environ.get("DATABASE_PATH"), BASE_DIR / "smart_tank.db"
 )
 
 # -----------------------------------------------------------------------------
@@ -90,19 +90,26 @@ MQTT_PORT = env_int("MQTT_PORT", 1883)
 MQTT_KEEPALIVE = env_int("MQTT_KEEPALIVE", 60)
 MQTT_USERNAME = os.environ.get("MQTT_USERNAME") or None
 MQTT_PASSWORD = os.environ.get("MQTT_PASSWORD") or None
-MQTT_CLIENT_ID = os.environ.get("MQTT_CLIENT_ID", "smart-room-flask-dashboard")
-MQTT_TOPIC_DATA = os.environ.get("MQTT_TOPIC_DATA", "room/data")
-MQTT_TOPIC_LOG = os.environ.get("MQTT_TOPIC_LOG", "room/data/log")
-MQTT_TOPIC_CONTROL = os.environ.get("MQTT_TOPIC_CONTROL", "room/control")
+MQTT_CLIENT_ID = os.environ.get("MQTT_CLIENT_ID", "smart-water-tank-flask-dashboard")
+MQTT_TOPIC_DATA = os.environ.get("MQTT_TOPIC_DATA", "tank/data")
+MQTT_TOPIC_LOG = os.environ.get("MQTT_TOPIC_LOG", "tank/data/log")
+MQTT_TOPIC_CONTROL = os.environ.get("MQTT_TOPIC_CONTROL", "tank/control")
 MQTT_SUBSCRIBE_TOPICS = tuple(dict.fromkeys([MQTT_TOPIC_DATA, MQTT_TOPIC_LOG]))
 
 COMMAND_TO_ARDUINO_CODE = {
-    "LED_ON": "L1",
-    "LED_OFF": "L0",
+    "PUMP_ON": "P1",
+    "PUMP_OFF": "P0",
+    "ALARM_ON": "B1",
+    "ALARM_OFF": "B0",
+    "VALVE_OPEN": "V1",
+    "VALVE_CLOSE": "V0",
+    # Backward-compatible command aliases from the earlier dashboard.
+    "LED_ON": "P1",
+    "LED_OFF": "P0",
     "BUZZER_ON": "B1",
     "BUZZER_OFF": "B0",
-    "DOOR_OPEN": "D1",
-    "DOOR_CLOSE": "D0",
+    "DOOR_OPEN": "V1",
+    "DOOR_CLOSE": "V0",
     "AUTO_ON": "A1",
     "AUTO_OFF": "A0",
 }
@@ -126,12 +133,15 @@ mqtt_status = {
 }
 
 DEFAULT_SYSTEM_STATE = {
-    "door_status": "OPEN",
-    "led_status": "ON",
+    # door_status is reused as valve_status for the water-tank prototype.
+    "door_status": "CLOSED",
+    # led_status is reused as pump_status / green pump-status LED.
+    "led_status": "OFF",
+    # buzzer_status is reused as alarm_status / buzzer + red LED.
     "buzzer_status": "OFF",
     "auto_mode": "1",
-    "connection": "Bluetooth Connected",
-    # MOCK_MODE=true means /api/current generates a fresh demo sample.
+    "connection": "MQTT/Bluetooth Gateway Connected",
+    # MOCK_MODE=true means /api/current generates a fresh water-tank demo sample.
     # MOCK_MODE=false means /api/current only reads the latest SQLite row.
     "mock_mode": "1" if env_bool("MOCK_MODE", True) else "0",
 }
@@ -198,7 +208,7 @@ def _time_label(dt: datetime | None = None) -> str:
 
 
 def get_system_state() -> Dict[str, object]:
-    """Read current LED/buzzer/door/auto state from SQLite."""
+    """Read current pump/alarm/valve/auto state from SQLite."""
     with get_db() as conn:
         rows = conn.execute("SELECT key, value FROM system_state").fetchall()
 
@@ -238,30 +248,48 @@ def update_system_state(updates: Dict[str, object]) -> None:
 
 
 def generate_sensor_record(dt: datetime | None = None) -> Dict[str, object]:
-    """Generate one mock sensor record using current SQLite system state.
+    """Generate one mock water-tank sensor record using current SQLite state.
+
+    Prototype mapping:
+    - temperature column stores water_level (%) for backward-compatible SQLite.
+    - humidity column stores backup float/pressure level (%).
+    - light column stores analog A0 value from the simulated float/LDR.
+    - distance column stores HC-SR04 distance from sensor to water surface (cm).
 
     Later replacement point:
-    - Parse real Arduino JSON from Bluetooth/Serial.
+    - Parse real Arduino JSON from Bluetooth/Serial/MQTT.
     - Store that parsed payload with insert_sensor_record().
     """
     dt = dt or datetime.now()
     state = get_system_state()
 
-    temperature = round(random.uniform(24.5, 31.5), 1)
-    humidity = random.randint(54, 78)
-    light = random.randint(180, 760)
-    distance = random.randint(8, 55)
+    tank_height_cm = 50
+    empty_distance_cm = 45
+    full_distance_cm = 5
+    distance_cm = random.randint(full_distance_cm, empty_distance_cm)
+    water_level = round((empty_distance_cm - distance_cm) / (empty_distance_cm - full_distance_cm) * 100, 1)
+    water_level = max(0, min(100, water_level))
+    float_level = int(max(0, min(100, round(water_level + random.uniform(-4, 4)))))
+    analog_value = int(round(float_level / 100 * 1023))
+
+    alarm_status = "ON" if water_level >= 95 or water_level <= 10 else state["buzzer_status"]
+    pump_status = state["led_status"]
+    if state["auto_mode"]:
+        if water_level <= 30:
+            pump_status = "ON"
+        elif water_level >= 85:
+            pump_status = "OFF"
 
     return {
         "time": _now_string(dt),
         "label": _time_label(dt),
-        "temperature": temperature,
-        "humidity": humidity,
-        "light": light,
-        "distance": distance,
+        "temperature": water_level,
+        "humidity": float_level,
+        "light": analog_value,
+        "distance": distance_cm,
         "door_status": state["door_status"],
-        "led_status": state["led_status"],
-        "buzzer_status": state["buzzer_status"],
+        "led_status": pump_status,
+        "buzzer_status": alarm_status,
         "auto_mode": bool(state["auto_mode"]),
         "connection": state["connection"],
         "last_updated": _now_string(dt),
@@ -309,21 +337,41 @@ def append_current_record() -> Dict[str, object]:
 
 
 def row_to_public_record(row: sqlite3.Row | Dict[str, object]) -> Dict[str, object]:
-    """Normalize SQLite rows to the JSON shape expected by the frontend."""
+    """Normalize SQLite rows to the JSON shape expected by the frontend.
+
+    The original SQLite columns are kept for compatibility, but this water-tank
+    dashboard also exposes semantic aliases: water_level, float_level,
+    analog_value, distance_cm, valve_status, pump_status, and alarm_status.
+    """
+    created_at = row["created_at"] if "created_at" in row.keys() else row["time"]
+    water_level = row["temperature"]
+    float_level = row["humidity"]
+    analog_value = row["light"]
+    distance_cm = row["distance"]
+    valve_status = row["door_status"]
+    pump_status = row["led_status"]
+    alarm_status = row["buzzer_status"]
     return {
-        "time": row["created_at"] if "created_at" in row.keys() else row["time"],
-        "temperature": row["temperature"],
-        "humidity": row["humidity"],
-        "light": row["light"],
-        "distance": row["distance"],
-        "door_status": row["door_status"],
-        "led_status": row["led_status"],
-        "buzzer_status": row["buzzer_status"],
+        "time": created_at,
+        # Backward-compatible keys consumed by existing chart/history code.
+        "temperature": water_level,
+        "humidity": float_level,
+        "light": analog_value,
+        "distance": distance_cm,
+        "door_status": valve_status,
+        "led_status": pump_status,
+        "buzzer_status": alarm_status,
+        # Water-tank semantic keys.
+        "water_level": water_level,
+        "float_level": float_level,
+        "analog_value": analog_value,
+        "distance_cm": distance_cm,
+        "valve_status": valve_status,
+        "pump_status": pump_status,
+        "alarm_status": alarm_status,
         "auto_mode": bool(row["auto_mode"]),
         "connection": row["connection"],
-        "last_updated": (
-            row["created_at"] if "created_at" in row.keys() else row["last_updated"]
-        ),
+        "last_updated": created_at,
     }
 
 
@@ -383,7 +431,7 @@ def clear_sensor_records(reset_state: bool = False) -> int:
 
     This is useful during demo/testing when you want to clear SQLite history
     before sending fresh data from Swagger, curl, or future Bluetooth/Serial code.
-    System state is preserved by default so LED/buzzer/door/mock-mode settings do
+    System state is preserved by default so pump/alarm/valve/mock-mode settings do
     not unexpectedly change unless reset_state=true is sent in the request body.
     """
     with get_db() as conn:
@@ -447,12 +495,11 @@ def _label_from_time(value: str) -> str:
 def record_from_sensor_payload(
     payload: Dict[str, object],
 ) -> tuple[Dict[str, object], Dict[str, object]]:
-    """Validate external sensor JSON and convert it to a SQLite record.
+    """Validate external water-tank sensor JSON and convert it to a record.
 
-    This is the endpoint-ready shape for Raspberry Pi/Bluetooth ingestion.
-    Required fields: temperature, humidity, light, distance.
-    Optional fields: door_status, led_status, buzzer_status, auto_mode,
-    connection, time/timestamp/created_at.
+    Preferred water-tank fields: water_level, float_level, analog_value,
+    distance_cm, valve_status, pump_status, alarm_status, auto_mode.
+    Backward-compatible fields from the previous dashboard are also accepted.
     """
     state = get_system_state()
     created_at = str(
@@ -462,43 +509,62 @@ def record_from_sensor_payload(
         or _now_string()
     )
 
-    door_status = _status(
-        payload.get("door_status", state["door_status"]),
+    valve_status = _status(
+        payload.get("valve_status", payload.get("door_status", state["door_status"])),
         {"OPEN", "CLOSED"},
-        "door_status",
+        "valve_status",
     )
-    led_status = _status(
-        payload.get("led_status", state["led_status"]), {"ON", "OFF"}, "led_status"
-    )
-    buzzer_status = _status(
-        payload.get("buzzer_status", state["buzzer_status"]),
+    pump_status = _status(
+        payload.get("pump_status", payload.get("led_status", state["led_status"])),
         {"ON", "OFF"},
-        "buzzer_status",
+        "pump_status",
+    )
+    alarm_status = _status(
+        payload.get("alarm_status", payload.get("buzzer_status", state["buzzer_status"])),
+        {"ON", "OFF"},
+        "alarm_status",
     )
     auto_mode = parse_bool(payload.get("auto_mode", state["auto_mode"]))
     connection = str(payload.get("connection", state["connection"])).strip() or str(
         state["connection"]
     )
 
+    if "water_level" in payload:
+        water_level = _number(payload, "water_level")
+    else:
+        water_level = _number(payload, "temperature")
+    if "float_level" in payload:
+        float_level = _number(payload, "float_level", integer=True)
+    else:
+        float_level = _number(payload, "humidity", integer=True)
+    if "analog_value" in payload:
+        analog_value = _number(payload, "analog_value", integer=True)
+    else:
+        analog_value = _number(payload, "light", integer=True)
+    if "distance_cm" in payload:
+        distance_cm = _number(payload, "distance_cm", integer=True)
+    else:
+        distance_cm = _number(payload, "distance", integer=True)
+
     record = {
         "time": created_at,
         "label": _label_from_time(created_at),
-        "temperature": _number(payload, "temperature"),
-        "humidity": _number(payload, "humidity", integer=True),
-        "light": _number(payload, "light", integer=True),
-        "distance": _number(payload, "distance", integer=True),
-        "door_status": door_status,
-        "led_status": led_status,
-        "buzzer_status": buzzer_status,
+        "temperature": water_level,
+        "humidity": float_level,
+        "light": analog_value,
+        "distance": distance_cm,
+        "door_status": valve_status,
+        "led_status": pump_status,
+        "buzzer_status": alarm_status,
         "auto_mode": auto_mode,
         "connection": connection,
         "last_updated": created_at,
     }
 
     state_updates = {
-        "door_status": door_status,
-        "led_status": led_status,
-        "buzzer_status": buzzer_status,
+        "door_status": valve_status,
+        "led_status": pump_status,
+        "buzzer_status": alarm_status,
         "auto_mode": auto_mode,
         "connection": connection,
     }
@@ -660,17 +726,17 @@ def openapi_spec() -> Dict[str, object]:
         "type": "object",
         "properties": {
             "time": {"type": "string", "example": "2026-06-07 10:30:00"},
-            "temperature": {"type": "number", "format": "float", "example": 28.5},
-            "humidity": {"type": "integer", "example": 70},
-            "light": {"type": "integer", "example": 420},
-            "distance": {"type": "integer", "example": 18},
-            "door_status": {
+            "water_level": {"type": "number", "format": "float", "example": 72.5},
+            "float_level": {"type": "integer", "example": 73},
+            "analog_value": {"type": "integer", "example": 746},
+            "distance_cm": {"type": "integer", "example": 16},
+            "valve_status": {
                 "type": "string",
                 "enum": ["OPEN", "CLOSED"],
                 "example": "OPEN",
             },
-            "led_status": {"type": "string", "enum": ["ON", "OFF"], "example": "ON"},
-            "buzzer_status": {
+            "pump_status": {"type": "string", "enum": ["ON", "OFF"], "example": "ON"},
+            "alarm_status": {
                 "type": "string",
                 "enum": ["ON", "OFF"],
                 "example": "OFF",
@@ -681,13 +747,13 @@ def openapi_spec() -> Dict[str, object]:
         },
         "required": [
             "time",
-            "temperature",
-            "humidity",
-            "light",
-            "distance",
-            "door_status",
-            "led_status",
-            "buzzer_status",
+            "water_level",
+            "float_level",
+            "analog_value",
+            "distance_cm",
+            "valve_status",
+            "pump_status",
+            "alarm_status",
             "auto_mode",
             "connection",
             "last_updated",
@@ -697,7 +763,7 @@ def openapi_spec() -> Dict[str, object]:
     return {
         "openapi": "3.0.3",
         "info": {
-            "title": "Smart Room Monitoring & Control API",
+            "title": "Smart Water Tank Monitoring & Control API",
             "description": "SQLite-backed mock API for the IoT dashboard UI. Sensor values are mock data for now; control states are persisted in SQLite.",
             "version": "1.0.0",
         },
@@ -706,11 +772,11 @@ def openapi_spec() -> Dict[str, object]:
             {"name": "Dashboard", "description": "Dashboard pages and documentation"},
             {
                 "name": "Sensors",
-                "description": "Current sensor data, history, chart data, and external sensor ingestion",
+                "description": "Current tank sensor data, history, chart data, and external sensor ingestion",
             },
             {
                 "name": "Controls",
-                "description": "Device and auto-mode control commands",
+                "description": "Pump, alarm, valve, and auto-mode control commands",
             },
             {
                 "name": "MQTT",
@@ -728,10 +794,10 @@ def openapi_spec() -> Dict[str, object]:
                     "type": "object",
                     "properties": {
                         "labels": {"type": "array", "items": {"type": "string"}},
-                        "temperature": {"type": "array", "items": {"type": "number"}},
-                        "humidity": {"type": "array", "items": {"type": "integer"}},
-                        "light": {"type": "array", "items": {"type": "integer"}},
-                        "distance": {"type": "array", "items": {"type": "integer"}},
+                        "water_level": {"type": "array", "items": {"type": "number"}},
+                        "float_level": {"type": "array", "items": {"type": "integer"}},
+                        "analog_value": {"type": "array", "items": {"type": "integer"}},
+                        "distance_cm": {"type": "array", "items": {"type": "integer"}},
                     },
                 },
                 "HistoryResponse": {
@@ -755,14 +821,14 @@ def openapi_spec() -> Dict[str, object]:
                         "command": {
                             "type": "string",
                             "enum": [
-                                "LED_ON",
-                                "LED_OFF",
-                                "BUZZER_ON",
-                                "BUZZER_OFF",
-                                "DOOR_OPEN",
-                                "DOOR_CLOSE",
+                                "PUMP_ON",
+                                "PUMP_OFF",
+                                "ALARM_ON",
+                                "ALARM_OFF",
+                                "VALVE_OPEN",
+                                "VALVE_CLOSE",
                             ],
-                            "example": "LED_ON",
+                            "example": "PUMP_ON",
                         }
                     },
                     "required": ["command"],
@@ -795,11 +861,11 @@ def openapi_spec() -> Dict[str, object]:
                         "port": {"type": "integer", "example": 1883},
                         "client_id": {
                             "type": "string",
-                            "example": "smart-room-flask-dashboard",
+                            "example": "smart-water-tank-flask-dashboard",
                         },
-                        "data_topic": {"type": "string", "example": "room/data"},
-                        "log_topic": {"type": "string", "example": "room/data/log"},
-                        "control_topic": {"type": "string", "example": "room/control"},
+                        "data_topic": {"type": "string", "example": "tank/data"},
+                        "log_topic": {"type": "string", "example": "tank/data/log"},
+                        "control_topic": {"type": "string", "example": "tank/control"},
                         "last_message_at": {"type": "string", "nullable": True},
                         "last_publish_at": {"type": "string", "nullable": True},
                         "last_error": {"type": "string", "nullable": True},
@@ -809,7 +875,7 @@ def openapi_spec() -> Dict[str, object]:
                     "type": "object",
                     "properties": {
                         "published": {"type": "boolean", "example": True},
-                        "topic": {"type": "string", "example": "room/control"},
+                        "topic": {"type": "string", "example": "tank/control"},
                         "reason": {
                             "type": "string",
                             "example": "MQTT broker not connected",
@@ -822,7 +888,7 @@ def openapi_spec() -> Dict[str, object]:
                         "reset_state": {
                             "type": "boolean",
                             "example": False,
-                            "description": "Optional. If true, also resets LED/buzzer/door/auto/mock-mode state to defaults.",
+                            "description": "Optional. If true, also resets pump/alarm/valve/auto/mock-mode state to defaults.",
                         }
                     },
                 },
@@ -841,25 +907,25 @@ def openapi_spec() -> Dict[str, object]:
                 "SensorDataRequest": {
                     "type": "object",
                     "properties": {
-                        "temperature": {
+                        "water_level": {
                             "type": "number",
                             "format": "float",
-                            "example": 28.5,
+                            "example": 72.5,
                         },
-                        "humidity": {"type": "integer", "example": 70},
-                        "light": {"type": "integer", "example": 420},
-                        "distance": {"type": "integer", "example": 18},
-                        "door_status": {
+                        "float_level": {"type": "integer", "example": 73},
+                        "analog_value": {"type": "integer", "example": 746},
+                        "distance_cm": {"type": "integer", "example": 16},
+                        "valve_status": {
                             "type": "string",
                             "enum": ["OPEN", "CLOSED"],
                             "example": "OPEN",
                         },
-                        "led_status": {
+                        "pump_status": {
                             "type": "string",
                             "enum": ["ON", "OFF"],
                             "example": "ON",
                         },
-                        "buzzer_status": {
+                        "alarm_status": {
                             "type": "string",
                             "enum": ["ON", "OFF"],
                             "example": "OFF",
@@ -867,14 +933,14 @@ def openapi_spec() -> Dict[str, object]:
                         "auto_mode": {"type": "boolean", "example": False},
                         "connection": {
                             "type": "string",
-                            "example": "Bluetooth Connected",
+                            "example": "MQTT/Bluetooth Gateway Connected",
                         },
                         "timestamp": {
                             "type": "string",
                             "example": "2026-06-07 10:30:00",
                         },
                     },
-                    "required": ["temperature", "humidity", "light", "distance"],
+                    "required": ["water_level", "float_level", "analog_value", "distance_cm"],
                 },
                 "CommandResponse": {
                     "type": "object",
@@ -882,7 +948,7 @@ def openapi_spec() -> Dict[str, object]:
                         "success": {"type": "boolean", "example": True},
                         "message": {
                             "type": "string",
-                            "example": "Command sent: LED_ON",
+                            "example": "Command sent: PUMP_ON",
                         },
                         "mqtt": {"$ref": "#/components/schemas/MqttPublishResult"},
                         "data": {"$ref": "#/components/schemas/SensorRecord"},
@@ -926,7 +992,7 @@ def openapi_spec() -> Dict[str, object]:
                 "get": {
                     "tags": ["MQTT"],
                     "summary": "Get MQTT broker connection and topic status",
-                    "description": "Flask subscribes to sensor topics and publishes control commands to the configured MQTT broker. Defaults: data room/data, log room/data/log, control room/control.",
+                    "description": "Flask subscribes to sensor topics and publishes control commands to the configured MQTT broker. Defaults: data tank/data, log tank/data/log, control tank/control.",
                     "responses": {
                         "200": {
                             "description": "MQTT status",
@@ -1448,10 +1514,16 @@ def api_chart_data():
     return jsonify(
         {
             "labels": [row["label"] for row in rows],
+            # Backward-compatible chart keys.
             "temperature": [row["temperature"] for row in rows],
             "humidity": [row["humidity"] for row in rows],
             "light": [row["light"] for row in rows],
             "distance": [row["distance"] for row in rows],
+            # Water-tank semantic chart keys.
+            "water_level": [row["temperature"] for row in rows],
+            "float_level": [row["humidity"] for row in rows],
+            "analog_value": [row["light"] for row in rows],
+            "distance_cm": [row["distance"] for row in rows],
         }
     )
 
@@ -1467,6 +1539,13 @@ def api_control():
     command = str(payload.get("command", "")).upper().strip()
 
     command_map = {
+        "PUMP_ON": ("led_status", "ON"),
+        "PUMP_OFF": ("led_status", "OFF"),
+        "ALARM_ON": ("buzzer_status", "ON"),
+        "ALARM_OFF": ("buzzer_status", "OFF"),
+        "VALVE_OPEN": ("door_status", "OPEN"),
+        "VALVE_CLOSE": ("door_status", "CLOSED"),
+        # Backward-compatible aliases.
         "LED_ON": ("led_status", "ON"),
         "LED_OFF": ("led_status", "OFF"),
         "BUZZER_ON": ("buzzer_status", "ON"),

@@ -874,6 +874,12 @@ tbody tr:last-child td {
     background: var(--surface);
     box-shadow: var(--shadow-elevated);
     animation: toast-in 220ms ease both;
+    transition: opacity 220ms ease, transform 220ms ease;
+}
+
+.toast.is-hiding {
+    opacity: 0;
+    transform: translateY(10px) scale(0.98);
 }
 
 .toast.error {
