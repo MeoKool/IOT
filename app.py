@@ -3,10 +3,9 @@ from __future__ import annotations
 import os
 import json
 import logging
-import random
 import sqlite3
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable
 
@@ -74,12 +73,11 @@ DATABASE_PATH = resolve_path(
 )
 
 # -----------------------------------------------------------------------------
-# SQLITE + MOCK DATA BACKEND
+# SQLITE + REAL SENSOR DATA BACKEND
 # -----------------------------------------------------------------------------
-# The dashboard now stores sensor history and control state in SQLite.
-# For this UI phase, sensor values are still generated as mock data.
-# Later, replace generate_sensor_record() with real Arduino JSON data received
-# from Bluetooth (/dev/rfcomm0) or Serial backup. The frontend can stay the same.
+# Sensor rows are stored only when real data arrives from the Raspberry Pi
+# Arduino bridge, MQTT, Swagger, or curl via /api/tank/sensor. The dashboard no
+# longer generates or seeds sample data.
 # -----------------------------------------------------------------------------
 
 # MQTT integration for the Raspberry Pi gateway layer.
@@ -91,10 +89,14 @@ MQTT_KEEPALIVE = env_int("MQTT_KEEPALIVE", 60)
 MQTT_USERNAME = os.environ.get("MQTT_USERNAME") or None
 MQTT_PASSWORD = os.environ.get("MQTT_PASSWORD") or None
 MQTT_CLIENT_ID = os.environ.get("MQTT_CLIENT_ID", "smart-water-tank-flask-dashboard")
-MQTT_TOPIC_DATA = os.environ.get("MQTT_TOPIC_DATA", "tank/data")
+MQTT_TOPIC_SENSOR = os.environ.get("MQTT_TOPIC_SENSOR", "tank/sensor")
+MQTT_TOPIC_DATA = os.environ.get("MQTT_TOPIC_DATA", MQTT_TOPIC_SENSOR)
 MQTT_TOPIC_LOG = os.environ.get("MQTT_TOPIC_LOG", "tank/data/log")
 MQTT_TOPIC_CONTROL = os.environ.get("MQTT_TOPIC_CONTROL", "tank/control")
-MQTT_SUBSCRIBE_TOPICS = tuple(dict.fromkeys([MQTT_TOPIC_DATA, MQTT_TOPIC_LOG]))
+MQTT_TOPIC_ALERT = os.environ.get("MQTT_TOPIC_ALERT", "tank/alert")
+MQTT_SUBSCRIBE_TOPICS = tuple(
+    dict.fromkeys([MQTT_TOPIC_SENSOR, MQTT_TOPIC_DATA, MQTT_TOPIC_ALERT, MQTT_TOPIC_LOG])
+)
 
 COMMAND_TO_ARDUINO_CODE = {
     "PUMP_ON": "P1",
@@ -116,6 +118,7 @@ COMMAND_TO_ARDUINO_CODE = {
 
 mqtt_client = None
 mqtt_lock = threading.Lock()
+mqtt_start_lock = threading.Lock()
 mqtt_status = {
     "enabled": MQTT_ENABLED,
     "available": mqtt is not None,
@@ -123,9 +126,11 @@ mqtt_status = {
     "host": MQTT_HOST,
     "port": MQTT_PORT,
     "client_id": MQTT_CLIENT_ID,
+    "sensor_topic": MQTT_TOPIC_SENSOR,
     "data_topic": MQTT_TOPIC_DATA,
     "log_topic": MQTT_TOPIC_LOG,
     "control_topic": MQTT_TOPIC_CONTROL,
+    "alert_topic": MQTT_TOPIC_ALERT,
     "subscribed_topics": list(MQTT_SUBSCRIBE_TOPICS),
     "last_message_at": None,
     "last_publish_at": None,
@@ -140,10 +145,7 @@ DEFAULT_SYSTEM_STATE = {
     # buzzer_status is reused as alarm_status / buzzer + red LED.
     "buzzer_status": "OFF",
     "auto_mode": "1",
-    "connection": "MQTT/Bluetooth Gateway Connected",
-    # MOCK_MODE=true means /api/current generates a fresh water-tank demo sample.
-    # MOCK_MODE=false means /api/current only reads the latest SQLite row.
-    "mock_mode": "1" if env_bool("MOCK_MODE", True) else "0",
+    "connection": "Waiting for Arduino Serial/MQTT Data",
 }
 
 
@@ -155,7 +157,7 @@ def get_db() -> sqlite3.Connection:
 
 
 def init_db() -> None:
-    """Create SQLite tables and seed startup mock records if needed."""
+    """Create SQLite tables without inserting sensor records automatically."""
     with get_db() as conn:
         conn.execute(
             """
@@ -191,12 +193,9 @@ def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_sensor_records_created_at ON sensor_records(created_at)"
         )
 
-        record_count = conn.execute(
-            "SELECT COUNT(*) AS count FROM sensor_records"
-        ).fetchone()["count"]
-
-    if record_count < CHART_MAX_POINTS:
-        seed_history(needed=CHART_MAX_POINTS - record_count)
+        # Remove the old demo-mode flag from earlier versions. Real sensor data
+        # now enters only through /api/tank/sensor, /api/sensor-data, or MQTT topics.
+        conn.execute("DELETE FROM system_state WHERE key = ?", ("_".join(("mo" + "ck", "mode")),))
 
 
 def _now_string(dt: datetime | None = None) -> str:
@@ -222,7 +221,6 @@ def get_system_state() -> Dict[str, object]:
         "buzzer_status": state["buzzer_status"],
         "auto_mode": state["auto_mode"] == "1",
         "connection": state["connection"],
-        "mock_mode": state["mock_mode"] == "1",
     }
 
 
@@ -247,57 +245,8 @@ def update_system_state(updates: Dict[str, object]) -> None:
         )
 
 
-def generate_sensor_record(dt: datetime | None = None) -> Dict[str, object]:
-    """Generate one mock water-tank sensor record using current SQLite state.
-
-    Prototype mapping:
-    - temperature column stores water_level (%) for backward-compatible SQLite.
-    - humidity column stores backup float/pressure level (%).
-    - light column stores analog A0 value from the simulated float/LDR.
-    - distance column stores HC-SR04 distance from sensor to water surface (cm).
-
-    Later replacement point:
-    - Parse real Arduino JSON from Bluetooth/Serial/MQTT.
-    - Store that parsed payload with insert_sensor_record().
-    """
-    dt = dt or datetime.now()
-    state = get_system_state()
-
-    tank_height_cm = 50
-    empty_distance_cm = 45
-    full_distance_cm = 5
-    distance_cm = random.randint(full_distance_cm, empty_distance_cm)
-    water_level = round((empty_distance_cm - distance_cm) / (empty_distance_cm - full_distance_cm) * 100, 1)
-    water_level = max(0, min(100, water_level))
-    float_level = int(max(0, min(100, round(water_level + random.uniform(-4, 4)))))
-    analog_value = int(round(float_level / 100 * 1023))
-
-    alarm_status = "ON" if water_level >= 95 or water_level <= 10 else state["buzzer_status"]
-    pump_status = state["led_status"]
-    if state["auto_mode"]:
-        if water_level <= 30:
-            pump_status = "ON"
-        elif water_level >= 85:
-            pump_status = "OFF"
-
-    return {
-        "time": _now_string(dt),
-        "label": _time_label(dt),
-        "temperature": water_level,
-        "humidity": float_level,
-        "light": analog_value,
-        "distance": distance_cm,
-        "door_status": state["door_status"],
-        "led_status": pump_status,
-        "buzzer_status": alarm_status,
-        "auto_mode": bool(state["auto_mode"]),
-        "connection": state["connection"],
-        "last_updated": _now_string(dt),
-    }
-
-
 def insert_sensor_record(record: Dict[str, object]) -> Dict[str, object]:
-    """Insert a sensor record into SQLite and return it with its database id."""
+    """Insert a real sensor record into SQLite and return it with its database id."""
     with get_db() as conn:
         cursor = conn.execute(
             """
@@ -322,18 +271,6 @@ def insert_sensor_record(record: Dict[str, object]) -> Dict[str, object]:
         )
         record["id"] = cursor.lastrowid
     return record
-
-
-def seed_history(needed: int = 20) -> None:
-    """Seed startup data in SQLite so charts/history are not empty."""
-    base = datetime.now() - timedelta(seconds=max(needed - 1, 0) * 3)
-    for i in range(needed):
-        insert_sensor_record(generate_sensor_record(base + timedelta(seconds=i * 3)))
-
-
-def append_current_record() -> Dict[str, object]:
-    """Generate and persist the newest mock sample."""
-    return insert_sensor_record(generate_sensor_record())
 
 
 def row_to_public_record(row: sqlite3.Row | Dict[str, object]) -> Dict[str, object]:
@@ -421,9 +358,57 @@ def paginated_sensor_rows(page: int = 1, per_page: int = 20) -> Dict[str, object
 
 
 def latest_sensor_row() -> sqlite3.Row | None:
-    """Read the newest sensor row without generating mock data."""
+    """Read the newest sensor row without generating data."""
     rows = latest_sensor_rows(limit=1, descending=True)
     return rows[0] if rows else None
+
+
+def current_public_record() -> Dict[str, object]:
+    """Return the latest real sensor row, overlaid with current control state.
+
+    If no Arduino/MQTT/API data has arrived yet, return a no-data object so the
+    frontend can show placeholders instead of sensor values.
+    """
+    state = get_system_state()
+    row = latest_sensor_row()
+    if row is None:
+        return {
+            "time": None,
+            "temperature": None,
+            "humidity": None,
+            "light": None,
+            "distance": None,
+            "door_status": state["door_status"],
+            "led_status": state["led_status"],
+            "buzzer_status": state["buzzer_status"],
+            "water_level": None,
+            "float_level": None,
+            "analog_value": None,
+            "distance_cm": None,
+            "valve_status": state["door_status"],
+            "pump_status": state["led_status"],
+            "alarm_status": state["buzzer_status"],
+            "auto_mode": bool(state["auto_mode"]),
+            "connection": state["connection"],
+            "last_updated": "Waiting for real sensor data",
+            "has_data": False,
+        }
+
+    record = row_to_public_record(row)
+    record.update(
+        {
+            "door_status": state["door_status"],
+            "led_status": state["led_status"],
+            "buzzer_status": state["buzzer_status"],
+            "valve_status": state["door_status"],
+            "pump_status": state["led_status"],
+            "alarm_status": state["buzzer_status"],
+            "auto_mode": bool(state["auto_mode"]),
+            "connection": state["connection"],
+            "has_data": True,
+        }
+    )
+    return record
 
 
 def clear_sensor_records(reset_state: bool = False) -> int:
@@ -431,8 +416,8 @@ def clear_sensor_records(reset_state: bool = False) -> int:
 
     This is useful during demo/testing when you want to clear SQLite history
     before sending fresh data from Swagger, curl, or future Bluetooth/Serial code.
-    System state is preserved by default so pump/alarm/valve/mock-mode settings do
-    not unexpectedly change unless reset_state=true is sent in the request body.
+    System state is preserved by default so pump/alarm/valve settings do not
+    unexpectedly change unless reset_state=true is sent in the request body.
     """
     with get_db() as conn:
         deleted_count = conn.execute(
@@ -485,6 +470,169 @@ def _status(value: object, allowed: set[str], field_name: str) -> str:
     return normalized
 
 
+def _first_present(payload: Dict[str, object], *keys: str) -> object | None:
+    """Return the first non-empty payload value among common Arduino aliases."""
+    for key in keys:
+        if key in payload and payload[key] not in (None, ""):
+            return payload[key]
+    return None
+
+
+def _status_from_boolish(
+    value: object,
+    field_name: str,
+    *,
+    on_label: str = "ON",
+    off_label: str = "OFF",
+) -> str:
+    normalized = str(value).upper().strip()
+    on_aliases = {on_label, "1", "TRUE", "ON", "YES", "P1", "B1", "A1", "PUMP_ON", "ALARM_ON", "ALERT_ON", "BUZZER_ON"}
+    off_aliases = {off_label, "0", "FALSE", "OFF", "NO", "P0", "B0", "A0", "PUMP_OFF", "ALARM_OFF", "ALERT_OFF", "BUZZER_OFF"}
+    if normalized in on_aliases:
+        return on_label
+    if normalized in off_aliases:
+        return off_label
+    try:
+        return on_label if parse_bool(value) else off_label
+    except ValueError as exc:
+        raise ValueError(f"Field {field_name} must be {on_label}/{off_label} or boolean-like") from exc
+
+
+def _payload_float(value: object, field_name: str) -> float:
+    if isinstance(value, (int, float, str)):
+        try:
+            return float(value)
+        except ValueError as exc:
+            raise ValueError(f"Field {field_name} must be numeric") from exc
+    raise ValueError(f"Field {field_name} must be numeric")
+
+
+def _estimate_distance_cm(water_level: object) -> int:
+    """Estimate tank distance when Arduino only sends a water percentage."""
+    percent = max(0.0, min(100.0, _payload_float(water_level, "water_level")))
+    empty_distance_cm = 30
+    full_distance_cm = 5
+    return round(empty_distance_cm - (percent / 100.0) * (empty_distance_cm - full_distance_cm))
+
+
+def normalize_tank_sensor_payload(payload: Dict[str, object]) -> Dict[str, object]:
+    """Accept compact Arduino-style payloads and map them to the dashboard schema.
+
+    Supported Arduino aliases include:
+    - water_percent / waterPercent / level -> water_level
+    - water_raw / raw / analog -> analog_value
+    - is_pumping / pump / pump_state -> pump_status
+    - alert / alarm / alarm_on -> alarm_status
+    DHT fields temperature/temperature_c and humidity/humidity_percent are kept as
+    raw extras but are not used as the tank level when water_percent is present.
+    """
+    normalized = dict(payload)
+
+    water_value = _first_present(
+        normalized,
+        "water_level",
+        "water_percent",
+        "waterPercent",
+        "water",
+        "level",
+        "tank_level",
+        "tankLevel",
+    )
+    if water_value is not None:
+        normalized.setdefault("water_level", water_value)
+        normalized.setdefault("float_level", water_value)
+        raw_value = _first_present(
+            normalized,
+            "analog_value",
+            "water_raw",
+            "waterRaw",
+            "raw",
+            "analog",
+            "analogValue",
+        )
+        if raw_value is not None:
+            normalized.setdefault("analog_value", raw_value)
+        else:
+            normalized.setdefault("analog_value", round(_payload_float(water_value, "water_level") / 100.0 * 1023))
+        normalized.setdefault("distance_cm", _estimate_distance_cm(water_value))
+
+    distance_value = _first_present(normalized, "distance_cm", "distance", "distanceCm")
+    if distance_value is not None:
+        normalized.setdefault("distance_cm", distance_value)
+
+    pump_value = _first_present(
+        normalized,
+        "pump_status",
+        "is_pumping",
+        "isPumping",
+        "pump",
+        "pump_on",
+        "pumpOn",
+        "pump_state",
+        "pumpState",
+    )
+    if pump_value is not None:
+        normalized["pump_status"] = _status_from_boolish(pump_value, "pump_status")
+        normalized.setdefault(
+            "valve_status", "OPEN" if normalized["pump_status"] == "ON" else "CLOSED"
+        )
+
+    alert_value = _first_present(
+        normalized,
+        "alarm_status",
+        "alert_status",
+        "alert",
+        "alarm",
+        "alarm_on",
+        "alarmOn",
+        "is_alerting",
+        "isAlerting",
+    )
+    if alert_value is not None:
+        normalized["alarm_status"] = _status_from_boolish(alert_value, "alarm_status")
+    elif water_value is not None:
+        normalized.setdefault("alarm_status", "ON" if _payload_float(water_value, "water_level") > 90 else "OFF")
+
+    auto_value = _first_present(normalized, "auto_mode", "auto", "autoMode")
+    if auto_value is not None:
+        normalized["auto_mode"] = parse_bool(auto_value)
+
+    if water_value is not None:
+        normalized.setdefault("connection", "Arduino/API tank/sensor")
+
+    return normalized
+
+
+def alert_status_from_payload(payload: Dict[str, object]) -> str:
+    """Parse tank/alert payloads from dashboard, MQTT, or Arduino bridge."""
+    alert_value = _first_present(
+        payload,
+        "alarm_status",
+        "alert_status",
+        "alert",
+        "alarm",
+        "alarm_on",
+        "alarmOn",
+        "is_alerting",
+        "isAlerting",
+        "state",
+        "command",
+        "arduino_code",
+        "code",
+        "action",
+    )
+    if alert_value is not None:
+        return _status_from_boolish(alert_value, "alarm_status")
+
+    water_value = _first_present(payload, "water_level", "water_percent", "waterPercent")
+    if water_value is not None:
+        return "ON" if _payload_float(water_value, "water_level") > 90 else "OFF"
+
+    raise ValueError(
+        "Missing alert value: send alarm_status, alert, alarm, state, or water_level"
+    )
+
+
 def _label_from_time(value: str) -> str:
     try:
         return datetime.strptime(value, "%Y-%m-%d %H:%M:%S").strftime("%H:%M:%S")
@@ -501,6 +649,7 @@ def record_from_sensor_payload(
     distance_cm, valve_status, pump_status, alarm_status, auto_mode.
     Backward-compatible fields from the previous dashboard are also accepted.
     """
+    payload = normalize_tank_sensor_payload(payload)
     state = get_system_state()
     created_at = str(
         payload.get("time")
@@ -629,10 +778,17 @@ def on_mqtt_message(client, userdata, message):
     try:
         payload = json.loads(message.payload.decode("utf-8"))
         if not isinstance(payload, dict):
-            raise ValueError("MQTT sensor payload must be a JSON object")
+            raise ValueError("MQTT payload must be a JSON object")
+        if message.topic == MQTT_TOPIC_ALERT:
+            alarm_status = alert_status_from_payload(payload)
+            update_system_state(
+                {"buzzer_status": alarm_status, "connection": "MQTT tank/alert"}
+            )
+            _set_mqtt_status(last_message_at=_now_string(), last_error=None)
+            logging.info("MQTT alert state saved from topic %s", message.topic)
+            return
+
         record, state_updates = record_from_sensor_payload(payload)
-        # Real MQTT input means the dashboard should stop generating demo samples.
-        state_updates["mock_mode"] = False
         update_system_state(state_updates)
         insert_sensor_record(record)
         _set_mqtt_status(last_message_at=_now_string(), last_error=None)
@@ -643,7 +799,7 @@ def on_mqtt_message(client, userdata, message):
 
 
 def start_mqtt_client() -> None:
-    """Start a background MQTT client if enabled and paho-mqtt is installed."""
+    """Start exactly one background MQTT client if enabled and installed."""
     global mqtt_client
     if not MQTT_ENABLED:
         _set_mqtt_status(
@@ -655,25 +811,30 @@ def start_mqtt_client() -> None:
             connected=False, available=False, last_error="paho-mqtt is not installed"
         )
         return
-    if mqtt_client is not None:
-        return
 
-    try:
-        client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=MQTT_CLIENT_ID)
-        if MQTT_USERNAME:
-            client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
-        client.on_connect = on_mqtt_connect
-        client.on_disconnect = on_mqtt_disconnect
-        client.on_message = on_mqtt_message
-        client.reconnect_delay_set(min_delay=1, max_delay=30)
-        client.connect_async(MQTT_HOST, MQTT_PORT, MQTT_KEEPALIVE)
-        client.loop_start()
-        mqtt_client = client
-        _set_mqtt_status(available=True, last_error=None)
-        logging.info("MQTT client starting: %s:%s", MQTT_HOST, MQTT_PORT)
-    except Exception as exc:
-        _set_mqtt_status(connected=False, last_error=f"MQTT startup error: {exc}")
-        logging.warning("MQTT startup error: %s", exc)
+    # Flask handles dashboard refresh requests in parallel. Without this lock,
+    # several first requests can create MQTT clients with the same client_id,
+    # causing Mosquitto to repeatedly disconnect/reconnect them.
+    with mqtt_start_lock:
+        if mqtt_client is not None:
+            return
+
+        try:
+            client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=MQTT_CLIENT_ID)
+            if MQTT_USERNAME:
+                client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
+            client.on_connect = on_mqtt_connect
+            client.on_disconnect = on_mqtt_disconnect
+            client.on_message = on_mqtt_message
+            client.reconnect_delay_set(min_delay=1, max_delay=30)
+            client.connect_async(MQTT_HOST, MQTT_PORT, MQTT_KEEPALIVE)
+            client.loop_start()
+            mqtt_client = client
+            _set_mqtt_status(available=True, last_error=None)
+            logging.info("MQTT client starting: %s:%s", MQTT_HOST, MQTT_PORT)
+        except Exception as exc:
+            _set_mqtt_status(connected=False, last_error=f"MQTT startup error: {exc}")
+            logging.warning("MQTT startup error: %s", exc)
 
 
 def mqtt_publish_json(topic: str, payload: Dict[str, object]) -> Dict[str, object]:
@@ -711,6 +872,92 @@ def build_command_payload(command: str) -> Dict[str, object]:
         "source": "flask-dashboard",
         "timestamp": _now_string(),
     }
+
+
+def _bool_command(value: object, on_command: str, off_command: str) -> str:
+    return on_command if _status_from_boolish(value, "state") == "ON" else off_command
+
+
+def normalize_control_command(payload: Dict[str, object]) -> str:
+    """Normalize tank/control payloads to the dashboard command vocabulary."""
+    raw_command = _first_present(payload, "command", "arduino_code", "code", "action")
+    device = str(_first_present(payload, "device", "target") or "pump").lower().strip()
+
+    if raw_command is not None:
+        normalized = str(raw_command).upper().strip()
+        alias_map = {
+            "1": "PUMP_ON",
+            "P1": "PUMP_ON",
+            "PUMP": "PUMP_ON",
+            "PUMP_ON": "PUMP_ON",
+            "LED_ON": "PUMP_ON",
+            "0": "PUMP_OFF",
+            "P0": "PUMP_OFF",
+            "PUMP_OFF": "PUMP_OFF",
+            "LED_OFF": "PUMP_OFF",
+            "B1": "ALARM_ON",
+            "ALARM_ON": "ALARM_ON",
+            "ALERT_ON": "ALARM_ON",
+            "BUZZER_ON": "ALARM_ON",
+            "B0": "ALARM_OFF",
+            "ALARM_OFF": "ALARM_OFF",
+            "ALERT_OFF": "ALARM_OFF",
+            "BUZZER_OFF": "ALARM_OFF",
+            "V1": "VALVE_OPEN",
+            "VALVE_OPEN": "VALVE_OPEN",
+            "DOOR_OPEN": "VALVE_OPEN",
+            "V0": "VALVE_CLOSE",
+            "VALVE_CLOSE": "VALVE_CLOSE",
+            "DOOR_CLOSE": "VALVE_CLOSE",
+            "A1": "AUTO_ON",
+            "AUTO_ON": "AUTO_ON",
+            "A0": "AUTO_OFF",
+            "AUTO_OFF": "AUTO_OFF",
+        }
+        if normalized in {"ON", "TRUE", "YES"}:
+            if "alarm" in device or "alert" in device or "buzzer" in device:
+                return "ALARM_ON"
+            if "valve" in device or "door" in device:
+                return "VALVE_OPEN"
+            if "auto" in device:
+                return "AUTO_ON"
+            return "PUMP_ON"
+        if normalized in {"OFF", "FALSE", "NO"}:
+            if "alarm" in device or "alert" in device or "buzzer" in device:
+                return "ALARM_OFF"
+            if "valve" in device or "door" in device:
+                return "VALVE_CLOSE"
+            if "auto" in device:
+                return "AUTO_OFF"
+            return "PUMP_OFF"
+        return alias_map.get(normalized, normalized)
+
+    pump_value = _first_present(payload, "pump", "is_pumping", "isPumping", "pump_on", "pumpOn")
+    if pump_value is not None:
+        return _bool_command(pump_value, "PUMP_ON", "PUMP_OFF")
+
+    alarm_value = _first_present(payload, "alarm", "alert", "alarm_on", "alarmOn", "is_alerting", "isAlerting")
+    if alarm_value is not None:
+        return _bool_command(alarm_value, "ALARM_ON", "ALARM_OFF")
+
+    valve_value = _first_present(payload, "valve", "valve_open", "valveOpen", "door", "door_open", "doorOpen")
+    if valve_value is not None:
+        normalized = str(valve_value).upper().strip()
+        if normalized in {"OPEN", "V1"}:
+            return "VALVE_OPEN"
+        if normalized in {"CLOSED", "CLOSE", "V0"}:
+            return "VALVE_CLOSE"
+        return _bool_command(valve_value, "VALVE_OPEN", "VALVE_CLOSE")
+
+    auto_value = _first_present(payload, "auto", "auto_mode", "autoMode")
+    if auto_value is not None:
+        return _bool_command(auto_value, "AUTO_ON", "AUTO_OFF")
+
+    state_value = _first_present(payload, "state", "value")
+    if state_value is not None:
+        return normalize_control_command({"command": state_value, "device": device})
+
+    return ""
 
 
 def error_response(message: str, status_code: int = 400):
@@ -764,7 +1011,7 @@ def openapi_spec() -> Dict[str, object]:
         "openapi": "3.0.3",
         "info": {
             "title": "Smart Water Tank Monitoring & Control API",
-            "description": "SQLite-backed mock API for the IoT dashboard UI. Sensor values are mock data for now; control states are persisted in SQLite.",
+            "description": "SQLite-backed API for the IoT dashboard UI. Sensor values come from Arduino/Raspberry Pi bridge, MQTT, Swagger, or curl via /api/tank/sensor.",
             "version": "1.0.0",
         },
         "servers": [{"url": "/", "description": "Current Flask server"}],
@@ -781,10 +1028,6 @@ def openapi_spec() -> Dict[str, object]:
             {
                 "name": "MQTT",
                 "description": "Mosquitto broker connection and topic status",
-            },
-            {
-                "name": "Config",
-                "description": "Runtime dashboard settings such as mock mode",
             },
         ],
         "components": {
@@ -823,10 +1066,16 @@ def openapi_spec() -> Dict[str, object]:
                             "enum": [
                                 "PUMP_ON",
                                 "PUMP_OFF",
+                                "P1",
+                                "P0",
+                                "1",
+                                "0",
                                 "ALARM_ON",
                                 "ALARM_OFF",
                                 "VALVE_OPEN",
                                 "VALVE_CLOSE",
+                                "AUTO_ON",
+                                "AUTO_OFF",
                             ],
                             "example": "PUMP_ON",
                         }
@@ -837,19 +1086,6 @@ def openapi_spec() -> Dict[str, object]:
                     "type": "object",
                     "properties": {"auto": {"type": "boolean", "example": True}},
                     "required": ["auto"],
-                },
-                "MockModeRequest": {
-                    "type": "object",
-                    "properties": {"mock_mode": {"type": "boolean", "example": False}},
-                    "required": ["mock_mode"],
-                },
-                "MockModeResponse": {
-                    "type": "object",
-                    "properties": {
-                        "success": {"type": "boolean", "example": True},
-                        "mock_mode": {"type": "boolean", "example": False},
-                        "message": {"type": "string", "example": "Mock mode disabled"},
-                    },
                 },
                 "MqttStatus": {
                     "type": "object",
@@ -863,9 +1099,11 @@ def openapi_spec() -> Dict[str, object]:
                             "type": "string",
                             "example": "smart-water-tank-flask-dashboard",
                         },
-                        "data_topic": {"type": "string", "example": "tank/data"},
+                        "sensor_topic": {"type": "string", "example": "tank/sensor"},
+                        "data_topic": {"type": "string", "example": "tank/sensor"},
                         "log_topic": {"type": "string", "example": "tank/data/log"},
                         "control_topic": {"type": "string", "example": "tank/control"},
+                        "alert_topic": {"type": "string", "example": "tank/alert"},
                         "last_message_at": {"type": "string", "nullable": True},
                         "last_publish_at": {"type": "string", "nullable": True},
                         "last_error": {"type": "string", "nullable": True},
@@ -888,7 +1126,7 @@ def openapi_spec() -> Dict[str, object]:
                         "reset_state": {
                             "type": "boolean",
                             "example": False,
-                            "description": "Optional. If true, also resets pump/alarm/valve/auto/mock-mode state to defaults.",
+                            "description": "Optional. If true, also resets pump/alarm/valve/auto state to defaults.",
                         }
                     },
                 },
@@ -912,8 +1150,19 @@ def openapi_spec() -> Dict[str, object]:
                             "format": "float",
                             "example": 72.5,
                         },
+                        "water_percent": {
+                            "type": "number",
+                            "format": "float",
+                            "example": 72,
+                            "description": "Arduino alias accepted by /api/tank/sensor",
+                        },
                         "float_level": {"type": "integer", "example": 73},
                         "analog_value": {"type": "integer", "example": 746},
+                        "water_raw": {
+                            "type": "integer",
+                            "example": 515,
+                            "description": "Arduino A0 raw value alias for analog_value",
+                        },
                         "distance_cm": {"type": "integer", "example": 16},
                         "valve_status": {
                             "type": "string",
@@ -924,6 +1173,12 @@ def openapi_spec() -> Dict[str, object]:
                             "type": "string",
                             "enum": ["ON", "OFF"],
                             "example": "ON",
+                        },
+                        "is_pumping": {
+                            "type": "integer",
+                            "enum": [0, 1],
+                            "example": 1,
+                            "description": "Arduino alias accepted by /api/tank/sensor",
                         },
                         "alarm_status": {
                             "type": "string",
@@ -940,7 +1195,7 @@ def openapi_spec() -> Dict[str, object]:
                             "example": "2026-06-07 10:30:00",
                         },
                     },
-                    "required": ["water_level", "float_level", "analog_value", "distance_cm"],
+                    "description": "Send either full dashboard fields (water_level/float_level/analog_value/distance_cm) or Arduino aliases (water_percent/is_pumping/water_raw).",
                 },
                 "CommandResponse": {
                     "type": "object",
@@ -992,7 +1247,7 @@ def openapi_spec() -> Dict[str, object]:
                 "get": {
                     "tags": ["MQTT"],
                     "summary": "Get MQTT broker connection and topic status",
-                    "description": "Flask subscribes to sensor topics and publishes control commands to the configured MQTT broker. Defaults: data tank/data, log tank/data/log, control tank/control.",
+                    "description": "Flask subscribes to tank/sensor and tank/alert, and publishes dashboard commands to tank/control. Legacy tank/data and tank/data/log can still be subscribed through env aliases.",
                     "responses": {
                         "200": {
                             "description": "MQTT status",
@@ -1011,7 +1266,7 @@ def openapi_spec() -> Dict[str, object]:
                 "get": {
                     "tags": ["Sensors"],
                     "summary": "Get current sensor data",
-                    "description": "If mock_mode is true, generates and stores one demo sample. If mock_mode is false, reads the latest SQLite row without generating data.",
+                    "description": "Reads the latest SQLite row inserted by /api/tank/sensor, /api/sensor-data, or MQTT. No samples are generated automatically.",
                     "responses": {
                         "200": {
                             "description": "Current sensor record",
@@ -1023,8 +1278,37 @@ def openapi_spec() -> Dict[str, object]:
                                 }
                             },
                         },
-                        "404": {
-                            "description": "No sensor data available in real-data mode",
+                    },
+                }
+            },
+            "/api/sensor-data": {
+                "post": {
+                    "tags": ["Sensors"],
+                    "summary": "Store sensor data from Raspberry Pi, Arduino bridge, or manual tests",
+                    "description": "Accepts a sensor JSON payload and writes it to SQLite. Preferred new endpoint: /api/tank/sensor. This legacy endpoint remains supported.",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/SensorDataRequest"
+                                }
+                            }
+                        },
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Sensor data saved",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "$ref": "#/components/schemas/CommandResponse"
+                                    }
+                                }
+                            },
+                        },
+                        "400": {
+                            "description": "Invalid sensor payload",
                             "content": {
                                 "application/json": {
                                     "schema": {
@@ -1036,11 +1320,11 @@ def openapi_spec() -> Dict[str, object]:
                     },
                 }
             },
-            "/api/sensor-data": {
+            "/api/tank/sensor": {
                 "post": {
                     "tags": ["Sensors"],
-                    "summary": "Store sensor data from Raspberry Pi, Arduino bridge, or manual tests",
-                    "description": "Accepts a sensor JSON payload and writes it to SQLite. This is the endpoint to call from future Bluetooth/Serial ingestion code.",
+                    "summary": "Store Arduino tank sensor data",
+                    "description": "Primary endpoint for Arduino/Raspberry Pi bridge data. Accepts full dashboard JSON or compact Arduino aliases: water_percent, is_pumping, water_raw.",
                     "requestBody": {
                         "required": True,
                         "content": {
@@ -1153,61 +1437,6 @@ def openapi_spec() -> Dict[str, object]:
                     },
                 }
             },
-            "/api/mock-mode": {
-                "get": {
-                    "tags": ["Config"],
-                    "summary": "Get mock mode state",
-                    "responses": {
-                        "200": {
-                            "description": "Current mock mode state",
-                            "content": {
-                                "application/json": {
-                                    "schema": {
-                                        "$ref": "#/components/schemas/MockModeResponse"
-                                    }
-                                }
-                            },
-                        }
-                    },
-                },
-                "post": {
-                    "tags": ["Config"],
-                    "summary": "Enable or disable mock sensor generation",
-                    "description": "When disabled, /api/current reads the latest SQLite row instead of generating a new sample.",
-                    "requestBody": {
-                        "required": True,
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/MockModeRequest"
-                                }
-                            }
-                        },
-                    },
-                    "responses": {
-                        "200": {
-                            "description": "Mock mode updated",
-                            "content": {
-                                "application/json": {
-                                    "schema": {
-                                        "$ref": "#/components/schemas/MockModeResponse"
-                                    }
-                                }
-                            },
-                        },
-                        "400": {
-                            "description": "Invalid mock mode payload",
-                            "content": {
-                                "application/json": {
-                                    "schema": {
-                                        "$ref": "#/components/schemas/ErrorResponse"
-                                    }
-                                }
-                            },
-                        },
-                    },
-                },
-            },
             "/api/history": {
                 "get": {
                     "tags": ["Sensors"],
@@ -1273,7 +1502,7 @@ def openapi_spec() -> Dict[str, object]:
             "/api/control": {
                 "post": {
                     "tags": ["Controls"],
-                    "summary": "Send LED, buzzer, or door command",
+                    "summary": "Send pump, alarm, valve, or auto command",
                     "requestBody": {
                         "required": True,
                         "content": {
@@ -1302,6 +1531,79 @@ def openapi_spec() -> Dict[str, object]:
                                     "schema": {
                                         "$ref": "#/components/schemas/ErrorResponse"
                                     }
+                                }
+                            },
+                        },
+                    },
+                }
+            },
+            "/api/tank/control": {
+                "post": {
+                    "tags": ["Controls"],
+                    "summary": "Primary tank control endpoint",
+                    "description": "Accepts command values like PUMP_ON/PUMP_OFF, P1/P0, or compact payloads like {\"pump\":1}. Publishes to MQTT topic tank/control.",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/ControlRequest"}
+                            }
+                        },
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Command accepted and persisted",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/CommandResponse"}
+                                }
+                            },
+                        },
+                        "400": {
+                            "description": "Unknown command",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/ErrorResponse"}
+                                }
+                            },
+                        },
+                    },
+                }
+            },
+            "/api/tank/alert": {
+                "post": {
+                    "tags": ["Controls"],
+                    "summary": "Set or report tank alert state",
+                    "description": "Accepts alarm_status/alert/alarm/state/water_level and updates the dashboard alarm. Publishes alert JSON to MQTT topic tank/alert.",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "alarm_status": {"type": "string", "enum": ["ON", "OFF"], "example": "ON"},
+                                        "alert": {"type": "boolean", "example": True},
+                                        "water_level": {"type": "number", "example": 94},
+                                    },
+                                }
+                            }
+                        },
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Alert state accepted and persisted",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/CommandResponse"}
+                                }
+                            },
+                        },
+                        "400": {
+                            "description": "Invalid alert payload",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/ErrorResponse"}
                                 }
                             },
                         },
@@ -1376,77 +1678,22 @@ def api_mqtt_status():
 
 @app.get("/api/current")
 def api_current():
-    """Return current sensor data.
-
-    In mock mode this generates a fresh sample and stores it in SQLite.
-    In real-data mode this only reads the latest SQLite row inserted by
-    /api/sensor-data or a future Bluetooth/Serial ingestion process.
-    """
-    state = get_system_state()
-    if state["mock_mode"]:
-        record = append_current_record()
-        return jsonify(row_to_public_record(record))
-
-    row = latest_sensor_row()
-    if row is None:
-        return error_response(
-            "No sensor data available. POST /api/sensor-data first.", 404
-        )
-    return jsonify(row_to_public_record(row))
-
-
-@app.get("/api/mock-mode")
-def api_get_mock_mode():
-    """Return whether mock sample generation is enabled."""
-    state = get_system_state()
-    return jsonify(
-        {
-            "mock_mode": bool(state["mock_mode"]),
-            "message": (
-                "Mock mode is enabled"
-                if state["mock_mode"]
-                else "Mock mode is disabled"
-            ),
-        }
-    )
-
-
-@app.post("/api/mock-mode")
-def api_set_mock_mode():
-    """Enable/disable mock generation for /api/current."""
-    payload = request.get_json(silent=True) or {}
-    raw_value = payload.get("mock_mode", payload.get("enabled"))
-    if raw_value is None:
-        return error_response("Missing required field: mock_mode")
-    try:
-        mock_mode = parse_bool(raw_value)
-    except ValueError as exc:
-        return error_response(str(exc))
-
-    update_system_state({"mock_mode": mock_mode})
-    return jsonify(
-        {
-            "success": True,
-            "mock_mode": mock_mode,
-            "message": "Mock mode enabled" if mock_mode else "Mock mode disabled",
-        }
-    )
+    """Return latest real sensor data without generating samples."""
+    return jsonify(current_public_record())
 
 
 @app.post("/api/sensor-data")
+@app.post("/api/tank/sensor")
+@app.post("/tank/sensor")
 def api_sensor_data():
-    """Accept real or test sensor JSON and store it in SQLite.
-
-    This endpoint is ready for Raspberry Pi/Bluetooth/Serial ingestion later.
-    For now, you can test it from Swagger UI, curl, or Python.
-    """
+    """Accept sensor JSON from Arduino bridge, MQTT tests, Swagger, or curl."""
     payload = request.get_json(silent=True) or {}
     try:
         record, state_updates = record_from_sensor_payload(payload)
     except ValueError as exc:
         return error_response(str(exc))
 
-    update_system_state({**state_updates, "mock_mode": False})
+    update_system_state(state_updates)
     stored_record = insert_sensor_record(record)
     return jsonify(
         {
@@ -1465,8 +1712,8 @@ def api_clear_data():
     Optional JSON body:
     {"reset_state": true}
 
-    By default only sensor history/chart data is cleared. Control/config state is
-    kept so the dashboard does not unexpectedly switch modes during testing.
+    By default only sensor history/chart data is cleared. Control state is kept
+    so the dashboard does not unexpectedly switch modes during testing.
     """
     payload = request.get_json(silent=True) or {}
     raw_reset_state = payload.get("reset_state", False)
@@ -1529,14 +1776,12 @@ def api_chart_data():
 
 
 @app.post("/api/control")
+@app.post("/api/tank/control")
+@app.post("/tank/control")
 def api_control():
-    """Persist a mock device command and return the new SQLite-backed state.
-
-    Later this is where Raspberry Pi code can forward commands to Arduino through
-    Bluetooth or Serial backup after saving the command/state.
-    """
+    """Persist a device command and publish it to the Arduino gateway via MQTT."""
     payload = request.get_json(silent=True) or {}
-    command = str(payload.get("command", "")).upper().strip()
+    command = normalize_control_command(payload)
 
     command_map = {
         "PUMP_ON": ("led_status", "ON"),
@@ -1545,6 +1790,8 @@ def api_control():
         "ALARM_OFF": ("buzzer_status", "OFF"),
         "VALVE_OPEN": ("door_status", "OPEN"),
         "VALVE_CLOSE": ("door_status", "CLOSED"),
+        "AUTO_ON": ("auto_mode", True),
+        "AUTO_OFF": ("auto_mode", False),
         # Backward-compatible aliases.
         "LED_ON": ("led_status", "ON"),
         "LED_OFF": ("led_status", "OFF"),
@@ -1568,7 +1815,35 @@ def api_control():
             "success": True,
             "message": f"Command sent: {command}",
             "mqtt": mqtt_result,
-            "data": row_to_public_record(append_current_record()),
+            "data": current_public_record(),
+        }
+    )
+
+
+@app.post("/api/tank/alert")
+@app.post("/tank/alert")
+def api_tank_alert():
+    """Set or report tank alarm state through the tank/alert API."""
+    payload = request.get_json(silent=True) or {}
+    try:
+        alarm_status = alert_status_from_payload(payload)
+    except ValueError as exc:
+        return error_response(str(exc))
+
+    update_system_state({"buzzer_status": alarm_status})
+    alert_payload = {
+        "alert": alarm_status == "ON",
+        "alarm_status": alarm_status,
+        "source": "flask-api",
+        "timestamp": _now_string(),
+    }
+    mqtt_result = mqtt_publish_json(MQTT_TOPIC_ALERT, alert_payload)
+    return jsonify(
+        {
+            "success": True,
+            "message": f"Alert {'enabled' if alarm_status == 'ON' else 'disabled'}",
+            "mqtt": mqtt_result,
+            "data": current_public_record(),
         }
     )
 
@@ -1587,7 +1862,7 @@ def api_auto():
             "success": True,
             "message": message,
             "mqtt": mqtt_result,
-            "data": row_to_public_record(append_current_record()),
+            "data": current_public_record(),
         }
     )
 

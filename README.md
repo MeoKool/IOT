@@ -2,7 +2,7 @@
 
 Hệ thống Giám sát và Điều khiển Bồn Nước Thông Minh
 
-Đây là Web UI Dashboard cho đồ án IoT Water Tank, tập trung vào giao diện web, Flask backend, SQLite, mock data và MQTT gateway để sau này kết nối Raspberry Pi/Arduino.
+Đây là Web UI Dashboard cho đồ án IoT Water Tank, tập trung vào giao diện web, Flask backend, SQLite, dữ liệu thật từ Arduino/Raspberry Pi bridge và MQTT gateway.
 
 ## 1. Mục tiêu
 
@@ -11,7 +11,7 @@ Dashboard mô phỏng hệ thống giám sát và điều khiển bồn nước:
 - Đo mực nước bằng cảm biến siêu âm HC-SR04.
 - Mô phỏng phao nổi/cảm biến áp suất bằng biến trở hoặc LDR analog.
 - Điều khiển bơm bằng servo/LED trạng thái bơm.
-- Điều khiển van bằng servo mock.
+- Điều khiển van bằng servo.
 - Báo động tràn/cạn bằng buzzer + LED đỏ.
 - Lưu lịch sử vào SQLite.
 - Hiển thị biểu đồ real-time bằng Chart.js.
@@ -361,4 +361,4 @@ ss -ltnp | grep 1883
 2. Arduino điều khiển servo bơm/van, LED xanh, buzzer, LED đỏ.
 3. Raspberry Pi nhận JSON từ Arduino qua Bluetooth/Serial.
 4. Raspberry Pi publish dữ liệu lên `tank/data` hoặc gọi `/api/sensor-data`.
-5. Dashboard hiển thị dữ liệu thật thay cho mock data.
+5. Dashboard hiển thị dữ liệu thật trên card, chart và history.

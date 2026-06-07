@@ -34,20 +34,30 @@ function renderLucideIcons() {
     }
 }
 
+function readSensorValue(data, ...keys) {
+    for (const key of keys) {
+        const value = data[key];
+        if (value !== null && value !== undefined && value !== "") {
+            return Number(value);
+        }
+    }
+    return null;
+}
+
 function readWaterLevel(data) {
-    return Number(data.water_level ?? data.temperature ?? 0);
+    return readSensorValue(data, "water_level", "temperature");
 }
 
 function readFloatLevel(data) {
-    return Number(data.float_level ?? data.humidity ?? 0);
+    return readSensorValue(data, "float_level", "humidity");
 }
 
 function readAnalogValue(data) {
-    return Number(data.analog_value ?? data.light ?? 0);
+    return readSensorValue(data, "analog_value", "light");
 }
 
 function readDistance(data) {
-    return Number(data.distance_cm ?? data.distance ?? 0);
+    return readSensorValue(data, "distance_cm", "distance");
 }
 
 function readValveStatus(data) {
@@ -141,19 +151,21 @@ function updateCurrentUI(data) {
     const floatLevel = readFloatLevel(data);
     const analogValue = readAnalogValue(data);
     const distance = readDistance(data);
+    const hasRealSensorData = data.has_data !== false;
     const valveStatus = readValveStatus(data);
     const pumpStatus = readPumpStatus(data);
     const alarmStatus = readAlarmStatus(data);
 
-    $("temperatureValue").textContent = waterLevel.toFixed ? waterLevel.toFixed(1) : waterLevel;
-    $("humidityValue").textContent = floatLevel;
-    $("lightValue").textContent = analogValue;
-    $("distanceValue").textContent = distance;
+    const waitingText = "Waiting for real Arduino data";
+    $("temperatureValue").textContent = waterLevel === null ? "--" : waterLevel.toFixed(1);
+    $("humidityValue").textContent = floatLevel === null ? "--" : floatLevel;
+    $("lightValue").textContent = analogValue === null ? "--" : analogValue;
+    $("distanceValue").textContent = distance === null ? "--" : distance;
 
-    $("temperatureStatus").textContent = statusTextForSensor("waterLevel", waterLevel);
-    $("humidityStatus").textContent = statusTextForSensor("floatLevel", floatLevel);
-    $("lightStatus").textContent = statusTextForSensor("analog", analogValue);
-    $("distanceStatus").textContent = statusTextForSensor("distance", distance);
+    $("temperatureStatus").textContent = hasRealSensorData && waterLevel !== null ? statusTextForSensor("waterLevel", waterLevel) : waitingText;
+    $("humidityStatus").textContent = hasRealSensorData && floatLevel !== null ? statusTextForSensor("floatLevel", floatLevel) : waitingText;
+    $("lightStatus").textContent = hasRealSensorData && analogValue !== null ? statusTextForSensor("analog", analogValue) : waitingText;
+    $("distanceStatus").textContent = hasRealSensorData && distance !== null ? statusTextForSensor("distance", distance) : waitingText;
 
     $("doorValue").textContent = valveStatus;
     $("ledValue").textContent = pumpStatus;
@@ -487,8 +499,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     bindHistoryPagination();
     await refreshDashboard();
 
-    // UI-only polling for the mock water-tank dashboard. Later this can be
-    // replaced by Server-Sent Events/WebSocket, or backed by real SQLite rows
-    // written by Raspberry Pi Bluetooth/Serial/MQTT ingestion.
+    // Poll the Flask API for real rows inserted by the Raspberry Pi
+    // Serial/Bluetooth/MQTT ingestion pipeline.
     window.setInterval(refreshDashboard, REFRESH_INTERVAL_MS);
 });

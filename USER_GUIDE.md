@@ -161,31 +161,15 @@ Panel hệ thống hiển thị:
 - Update interval: 3 seconds
 - System mode: Manual/Auto
 
-## 9. Mock mode
+## 9. Dữ liệu thật
 
-Mock mode là chế độ tự sinh dữ liệu bồn nước để demo khi chưa có Arduino.
-
-Kiểm tra mock mode:
+Dashboard không tự sinh dữ liệu nữa. Dữ liệu chỉ xuất hiện khi Raspberry Pi/Arduino bridge, MQTT, Swagger hoặc curl gửi vào endpoint:
 
 ```text
-http://RASPBERRY_PI_IP:5001/api/mock-mode
+POST /api/sensor-data
 ```
 
-Bật mock mode:
-
-```bash
-curl -X POST http://127.0.0.1:5001/api/mock-mode \
-  -H 'Content-Type: application/json' \
-  -d '{"mock_mode": true}'
-```
-
-Tắt mock mode:
-
-```bash
-curl -X POST http://127.0.0.1:5001/api/mock-mode \
-  -H 'Content-Type: application/json' \
-  -d '{"mock_mode": false}'
-```
+Khi chưa có dữ liệu, dashboard sẽ hiển thị `--` và trạng thái chờ dữ liệu thật.
 
 ## 10. Test API bằng Swagger
 
@@ -338,15 +322,13 @@ Không dùng `https://`.
 
 ### Không có dữ liệu mới
 
-Bật mock mode:
+Kiểm tra Arduino/bridge có đang gửi dữ liệu vào Flask không:
 
 ```bash
-curl -X POST http://127.0.0.1:5001/api/mock-mode \
-  -H 'Content-Type: application/json' \
-  -d '{"mock_mode": true}'
+python serial_api_bridge.py
 ```
 
-Hoặc gửi dữ liệu test vào `/api/sensor-data`.
+Hoặc gửi một record test vào `/api/sensor-data`.
 
 ### MQTT báo disconnected
 
