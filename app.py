@@ -41,7 +41,9 @@ def env_int(name: str, default: int) -> int:
     try:
         return int(os.environ.get(name, str(default)))
     except ValueError:
-        logging.warning("Invalid integer for %s=%r; using %s", name, os.environ.get(name), default)
+        logging.warning(
+            "Invalid integer for %s=%r; using %s", name, os.environ.get(name), default
+        )
         return default
 
 
@@ -49,7 +51,9 @@ def env_float(name: str, default: float) -> float:
     try:
         return float(os.environ.get(name, str(default)))
     except ValueError:
-        logging.warning("Invalid number for %s=%r; using %s", name, os.environ.get(name), default)
+        logging.warning(
+            "Invalid number for %s=%r; using %s", name, os.environ.get(name), default
+        )
         return default
 
 
@@ -59,13 +63,15 @@ def resolve_path(value: str | None, default: Path) -> Path:
 
 
 APP_HOST = os.environ.get("APP_HOST", "0.0.0.0")
-APP_PORT = env_int("APP_PORT", env_int("PORT", 5000))
-APP_DEBUG = env_bool("APP_DEBUG", True)
+APP_PORT = env_int("APP_PORT", env_int("PORT", 5001))
+APP_DEBUG = env_bool("APP_DEBUG", False)
 UPDATE_INTERVAL_SECONDS = max(1.0, env_float("UPDATE_INTERVAL_SECONDS", 3.0))
 REFRESH_INTERVAL_MS = int(UPDATE_INTERVAL_SECONDS * 1000)
 CHART_MAX_POINTS = max(1, env_int("CHART_MAX_POINTS", 20))
 HISTORY_DEFAULT_PER_PAGE = max(1, min(env_int("HISTORY_DEFAULT_PER_PAGE", 20), 100))
-DATABASE_PATH = resolve_path(os.environ.get("DATABASE_PATH"), BASE_DIR / "smart_room.db")
+DATABASE_PATH = resolve_path(
+    os.environ.get("DATABASE_PATH"), BASE_DIR / "smart_room.db"
+)
 
 # -----------------------------------------------------------------------------
 # SQLITE + MOCK DATA BACKEND
@@ -175,7 +181,9 @@ def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_sensor_records_created_at ON sensor_records(created_at)"
         )
 
-        record_count = conn.execute("SELECT COUNT(*) AS count FROM sensor_records").fetchone()["count"]
+        record_count = conn.execute(
+            "SELECT COUNT(*) AS count FROM sensor_records"
+        ).fetchone()["count"]
 
     if record_count < CHART_MAX_POINTS:
         seed_history(needed=CHART_MAX_POINTS - record_count)
@@ -213,7 +221,9 @@ def update_system_state(updates: Dict[str, object]) -> None:
     rows: Iterable[tuple[str, str]] = []
     normalized_rows = []
     for key, value in updates.items():
-        normalized_rows.append((key, "1" if value is True else "0" if value is False else str(value)))
+        normalized_rows.append(
+            (key, "1" if value is True else "0" if value is False else str(value))
+        )
     rows = normalized_rows
 
     with get_db() as conn:
@@ -311,7 +321,9 @@ def row_to_public_record(row: sqlite3.Row | Dict[str, object]) -> Dict[str, obje
         "buzzer_status": row["buzzer_status"],
         "auto_mode": bool(row["auto_mode"]),
         "connection": row["connection"],
-        "last_updated": row["created_at"] if "created_at" in row.keys() else row["last_updated"],
+        "last_updated": (
+            row["created_at"] if "created_at" in row.keys() else row["last_updated"]
+        ),
     }
 
 
@@ -336,7 +348,9 @@ def paginated_sensor_rows(page: int = 1, per_page: int = 20) -> Dict[str, object
     offset = (page - 1) * per_page
 
     with get_db() as conn:
-        total_records = conn.execute("SELECT COUNT(*) AS count FROM sensor_records").fetchone()["count"]
+        total_records = conn.execute(
+            "SELECT COUNT(*) AS count FROM sensor_records"
+        ).fetchone()["count"]
         rows = conn.execute(
             """
             SELECT * FROM sensor_records
@@ -373,7 +387,9 @@ def clear_sensor_records(reset_state: bool = False) -> int:
     not unexpectedly change unless reset_state=true is sent in the request body.
     """
     with get_db() as conn:
-        deleted_count = conn.execute("SELECT COUNT(*) AS count FROM sensor_records").fetchone()["count"]
+        deleted_count = conn.execute(
+            "SELECT COUNT(*) AS count FROM sensor_records"
+        ).fetchone()["count"]
         conn.execute("DELETE FROM sensor_records")
         conn.execute("DELETE FROM sqlite_sequence WHERE name = ?", ("sensor_records",))
         if reset_state:
@@ -400,7 +416,9 @@ def parse_bool(value: object) -> bool:
     raise ValueError("Expected boolean value")
 
 
-def _number(payload: Dict[str, object], key: str, *, integer: bool = False) -> int | float:
+def _number(
+    payload: Dict[str, object], key: str, *, integer: bool = False
+) -> int | float:
     if key not in payload:
         raise ValueError(f"Missing required field: {key}")
     try:
@@ -413,7 +431,9 @@ def _number(payload: Dict[str, object], key: str, *, integer: bool = False) -> i
 def _status(value: object, allowed: set[str], field_name: str) -> str:
     normalized = str(value).upper().strip()
     if normalized not in allowed:
-        raise ValueError(f"Field {field_name} must be one of: {', '.join(sorted(allowed))}")
+        raise ValueError(
+            f"Field {field_name} must be one of: {', '.join(sorted(allowed))}"
+        )
     return normalized
 
 
@@ -424,7 +444,9 @@ def _label_from_time(value: str) -> str:
         return value.split()[-1][:8] if value else _time_label()
 
 
-def record_from_sensor_payload(payload: Dict[str, object]) -> tuple[Dict[str, object], Dict[str, object]]:
+def record_from_sensor_payload(
+    payload: Dict[str, object],
+) -> tuple[Dict[str, object], Dict[str, object]]:
     """Validate external sensor JSON and convert it to a SQLite record.
 
     This is the endpoint-ready shape for Raspberry Pi/Bluetooth ingestion.
@@ -433,13 +455,30 @@ def record_from_sensor_payload(payload: Dict[str, object]) -> tuple[Dict[str, ob
     connection, time/timestamp/created_at.
     """
     state = get_system_state()
-    created_at = str(payload.get("time") or payload.get("timestamp") or payload.get("created_at") or _now_string())
+    created_at = str(
+        payload.get("time")
+        or payload.get("timestamp")
+        or payload.get("created_at")
+        or _now_string()
+    )
 
-    door_status = _status(payload.get("door_status", state["door_status"]), {"OPEN", "CLOSED"}, "door_status")
-    led_status = _status(payload.get("led_status", state["led_status"]), {"ON", "OFF"}, "led_status")
-    buzzer_status = _status(payload.get("buzzer_status", state["buzzer_status"]), {"ON", "OFF"}, "buzzer_status")
+    door_status = _status(
+        payload.get("door_status", state["door_status"]),
+        {"OPEN", "CLOSED"},
+        "door_status",
+    )
+    led_status = _status(
+        payload.get("led_status", state["led_status"]), {"ON", "OFF"}, "led_status"
+    )
+    buzzer_status = _status(
+        payload.get("buzzer_status", state["buzzer_status"]),
+        {"ON", "OFF"},
+        "buzzer_status",
+    )
     auto_mode = parse_bool(payload.get("auto_mode", state["auto_mode"]))
-    connection = str(payload.get("connection", state["connection"])).strip() or str(state["connection"])
+    connection = str(payload.get("connection", state["connection"])).strip() or str(
+        state["connection"]
+    )
 
     record = {
         "time": created_at,
@@ -490,17 +529,27 @@ def on_mqtt_connect(client, userdata, flags, reason_code, properties=None):
         for topic in MQTT_SUBSCRIBE_TOPICS:
             client.subscribe(topic)
         _set_mqtt_status(connected=True, last_error=None)
-        logging.info("MQTT connected to %s:%s; subscribed to %s", MQTT_HOST, MQTT_PORT, ", ".join(MQTT_SUBSCRIBE_TOPICS))
+        logging.info(
+            "MQTT connected to %s:%s; subscribed to %s",
+            MQTT_HOST,
+            MQTT_PORT,
+            ", ".join(MQTT_SUBSCRIBE_TOPICS),
+        )
         return
 
     _set_mqtt_status(connected=False, last_error=f"MQTT connect failed: {reason_code}")
     logging.warning("MQTT connect failed: %s", reason_code)
 
 
-def on_mqtt_disconnect(client, userdata, disconnect_flags, reason_code, properties=None):
+def on_mqtt_disconnect(
+    client, userdata, disconnect_flags, reason_code, properties=None
+):
     """Keep Flask alive when the broker is offline/restarting."""
     rc = mqtt_reason_code_value(reason_code)
-    _set_mqtt_status(connected=False, last_error=None if rc == 0 else f"MQTT disconnected: {reason_code}")
+    _set_mqtt_status(
+        connected=False,
+        last_error=None if rc == 0 else f"MQTT disconnected: {reason_code}",
+    )
     if rc != 0:
         logging.warning("MQTT disconnected unexpectedly: %s", reason_code)
 
@@ -531,10 +580,14 @@ def start_mqtt_client() -> None:
     """Start a background MQTT client if enabled and paho-mqtt is installed."""
     global mqtt_client
     if not MQTT_ENABLED:
-        _set_mqtt_status(connected=False, last_error="MQTT disabled by MQTT_ENABLED=false")
+        _set_mqtt_status(
+            connected=False, last_error="MQTT disabled by MQTT_ENABLED=false"
+        )
         return
     if mqtt is None:
-        _set_mqtt_status(connected=False, available=False, last_error="paho-mqtt is not installed")
+        _set_mqtt_status(
+            connected=False, available=False, last_error="paho-mqtt is not installed"
+        )
         return
     if mqtt_client is not None:
         return
@@ -563,7 +616,11 @@ def mqtt_publish_json(topic: str, payload: Dict[str, object]) -> Dict[str, objec
     if not status["enabled"]:
         return {"published": False, "topic": topic, "reason": "MQTT disabled"}
     if mqtt_client is None or not status["connected"]:
-        return {"published": False, "topic": topic, "reason": status.get("last_error") or "MQTT broker not connected"}
+        return {
+            "published": False,
+            "topic": topic,
+            "reason": status.get("last_error") or "MQTT broker not connected",
+        }
 
     try:
         info = mqtt_client.publish(topic, json.dumps(payload), qos=1)
@@ -607,9 +664,17 @@ def openapi_spec() -> Dict[str, object]:
             "humidity": {"type": "integer", "example": 70},
             "light": {"type": "integer", "example": 420},
             "distance": {"type": "integer", "example": 18},
-            "door_status": {"type": "string", "enum": ["OPEN", "CLOSED"], "example": "OPEN"},
+            "door_status": {
+                "type": "string",
+                "enum": ["OPEN", "CLOSED"],
+                "example": "OPEN",
+            },
             "led_status": {"type": "string", "enum": ["ON", "OFF"], "example": "ON"},
-            "buzzer_status": {"type": "string", "enum": ["ON", "OFF"], "example": "OFF"},
+            "buzzer_status": {
+                "type": "string",
+                "enum": ["ON", "OFF"],
+                "example": "OFF",
+            },
             "auto_mode": {"type": "boolean", "example": True},
             "connection": {"type": "string", "example": "Bluetooth Connected"},
             "last_updated": {"type": "string", "example": "2026-06-07 10:30:00"},
@@ -639,10 +704,22 @@ def openapi_spec() -> Dict[str, object]:
         "servers": [{"url": "/", "description": "Current Flask server"}],
         "tags": [
             {"name": "Dashboard", "description": "Dashboard pages and documentation"},
-            {"name": "Sensors", "description": "Current sensor data, history, chart data, and external sensor ingestion"},
-            {"name": "Controls", "description": "Device and auto-mode control commands"},
-            {"name": "MQTT", "description": "Mosquitto broker connection and topic status"},
-            {"name": "Config", "description": "Runtime dashboard settings such as mock mode"},
+            {
+                "name": "Sensors",
+                "description": "Current sensor data, history, chart data, and external sensor ingestion",
+            },
+            {
+                "name": "Controls",
+                "description": "Device and auto-mode control commands",
+            },
+            {
+                "name": "MQTT",
+                "description": "Mosquitto broker connection and topic status",
+            },
+            {
+                "name": "Config",
+                "description": "Runtime dashboard settings such as mock mode",
+            },
         ],
         "components": {
             "schemas": {
@@ -660,7 +737,10 @@ def openapi_spec() -> Dict[str, object]:
                 "HistoryResponse": {
                     "type": "object",
                     "properties": {
-                        "records": {"type": "array", "items": {"$ref": "#/components/schemas/SensorRecord"}},
+                        "records": {
+                            "type": "array",
+                            "items": {"$ref": "#/components/schemas/SensorRecord"},
+                        },
                         "page": {"type": "integer", "example": 1},
                         "per_page": {"type": "integer", "example": 20},
                         "total_records": {"type": "integer", "example": 128},
@@ -713,7 +793,10 @@ def openapi_spec() -> Dict[str, object]:
                         "connected": {"type": "boolean", "example": True},
                         "host": {"type": "string", "example": "127.0.0.1"},
                         "port": {"type": "integer", "example": 1883},
-                        "client_id": {"type": "string", "example": "smart-room-flask-dashboard"},
+                        "client_id": {
+                            "type": "string",
+                            "example": "smart-room-flask-dashboard",
+                        },
                         "data_topic": {"type": "string", "example": "room/data"},
                         "log_topic": {"type": "string", "example": "room/data/log"},
                         "control_topic": {"type": "string", "example": "room/control"},
@@ -727,7 +810,10 @@ def openapi_spec() -> Dict[str, object]:
                     "properties": {
                         "published": {"type": "boolean", "example": True},
                         "topic": {"type": "string", "example": "room/control"},
-                        "reason": {"type": "string", "example": "MQTT broker not connected"},
+                        "reason": {
+                            "type": "string",
+                            "example": "MQTT broker not connected",
+                        },
                     },
                 },
                 "ClearDataRequest": {
@@ -744,7 +830,10 @@ def openapi_spec() -> Dict[str, object]:
                     "type": "object",
                     "properties": {
                         "success": {"type": "boolean", "example": True},
-                        "message": {"type": "string", "example": "All sensor records cleared"},
+                        "message": {
+                            "type": "string",
+                            "example": "All sensor records cleared",
+                        },
                         "deleted_records": {"type": "integer", "example": 20},
                         "reset_state": {"type": "boolean", "example": False},
                     },
@@ -752,16 +841,38 @@ def openapi_spec() -> Dict[str, object]:
                 "SensorDataRequest": {
                     "type": "object",
                     "properties": {
-                        "temperature": {"type": "number", "format": "float", "example": 28.5},
+                        "temperature": {
+                            "type": "number",
+                            "format": "float",
+                            "example": 28.5,
+                        },
                         "humidity": {"type": "integer", "example": 70},
                         "light": {"type": "integer", "example": 420},
                         "distance": {"type": "integer", "example": 18},
-                        "door_status": {"type": "string", "enum": ["OPEN", "CLOSED"], "example": "OPEN"},
-                        "led_status": {"type": "string", "enum": ["ON", "OFF"], "example": "ON"},
-                        "buzzer_status": {"type": "string", "enum": ["ON", "OFF"], "example": "OFF"},
+                        "door_status": {
+                            "type": "string",
+                            "enum": ["OPEN", "CLOSED"],
+                            "example": "OPEN",
+                        },
+                        "led_status": {
+                            "type": "string",
+                            "enum": ["ON", "OFF"],
+                            "example": "ON",
+                        },
+                        "buzzer_status": {
+                            "type": "string",
+                            "enum": ["ON", "OFF"],
+                            "example": "OFF",
+                        },
                         "auto_mode": {"type": "boolean", "example": False},
-                        "connection": {"type": "string", "example": "Bluetooth Connected"},
-                        "timestamp": {"type": "string", "example": "2026-06-07 10:30:00"},
+                        "connection": {
+                            "type": "string",
+                            "example": "Bluetooth Connected",
+                        },
+                        "timestamp": {
+                            "type": "string",
+                            "example": "2026-06-07 10:30:00",
+                        },
                     },
                     "required": ["temperature", "humidity", "light", "distance"],
                 },
@@ -769,7 +880,10 @@ def openapi_spec() -> Dict[str, object]:
                     "type": "object",
                     "properties": {
                         "success": {"type": "boolean", "example": True},
-                        "message": {"type": "string", "example": "Command sent: LED_ON"},
+                        "message": {
+                            "type": "string",
+                            "example": "Command sent: LED_ON",
+                        },
                         "mqtt": {"$ref": "#/components/schemas/MqttPublishResult"},
                         "data": {"$ref": "#/components/schemas/SensorRecord"},
                     },
@@ -778,7 +892,10 @@ def openapi_spec() -> Dict[str, object]:
                     "type": "object",
                     "properties": {
                         "success": {"type": "boolean", "example": False},
-                        "message": {"type": "string", "example": "Unknown command: INVALID"},
+                        "message": {
+                            "type": "string",
+                            "example": "Unknown command: INVALID",
+                        },
                     },
                 },
             }
@@ -813,7 +930,13 @@ def openapi_spec() -> Dict[str, object]:
                     "responses": {
                         "200": {
                             "description": "MQTT status",
-                            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/MqttStatus"}}},
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "$ref": "#/components/schemas/MqttStatus"
+                                    }
+                                }
+                            },
                         }
                     },
                 }
@@ -826,11 +949,23 @@ def openapi_spec() -> Dict[str, object]:
                     "responses": {
                         "200": {
                             "description": "Current sensor record",
-                            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SensorRecord"}}},
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "$ref": "#/components/schemas/SensorRecord"
+                                    }
+                                }
+                            },
                         },
                         "404": {
                             "description": "No sensor data available in real-data mode",
-                            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}},
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "$ref": "#/components/schemas/ErrorResponse"
+                                    }
+                                }
+                            },
                         },
                     },
                 }
@@ -842,16 +977,34 @@ def openapi_spec() -> Dict[str, object]:
                     "description": "Accepts a sensor JSON payload and writes it to SQLite. This is the endpoint to call from future Bluetooth/Serial ingestion code.",
                     "requestBody": {
                         "required": True,
-                        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SensorDataRequest"}}},
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/SensorDataRequest"
+                                }
+                            }
+                        },
                     },
                     "responses": {
                         "200": {
                             "description": "Sensor data saved",
-                            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CommandResponse"}}},
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "$ref": "#/components/schemas/CommandResponse"
+                                    }
+                                }
+                            },
                         },
                         "400": {
                             "description": "Invalid sensor payload",
-                            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}},
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "$ref": "#/components/schemas/ErrorResponse"
+                                    }
+                                }
+                            },
                         },
                     },
                 }
@@ -863,16 +1016,34 @@ def openapi_spec() -> Dict[str, object]:
                     "description": "Deletes every row in sensor_records and resets the AUTOINCREMENT counter. Send reset_state=true to also restore system_state defaults.",
                     "requestBody": {
                         "required": False,
-                        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ClearDataRequest"}}},
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ClearDataRequest"
+                                }
+                            }
+                        },
                     },
                     "responses": {
                         "200": {
                             "description": "Sensor data cleared",
-                            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ClearDataResponse"}}},
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "$ref": "#/components/schemas/ClearDataResponse"
+                                    }
+                                }
+                            },
                         },
                         "400": {
                             "description": "Invalid clear data payload",
-                            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}},
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "$ref": "#/components/schemas/ErrorResponse"
+                                    }
+                                }
+                            },
                         },
                     },
                 }
@@ -884,16 +1055,34 @@ def openapi_spec() -> Dict[str, object]:
                     "description": "Same behavior as POST /api/clear-data.",
                     "requestBody": {
                         "required": False,
-                        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ClearDataRequest"}}},
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ClearDataRequest"
+                                }
+                            }
+                        },
                     },
                     "responses": {
                         "200": {
                             "description": "Sensor data cleared",
-                            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ClearDataResponse"}}},
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "$ref": "#/components/schemas/ClearDataResponse"
+                                    }
+                                }
+                            },
                         },
                         "400": {
                             "description": "Invalid clear data payload",
-                            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}},
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "$ref": "#/components/schemas/ErrorResponse"
+                                    }
+                                }
+                            },
                         },
                     },
                 }
@@ -905,7 +1094,13 @@ def openapi_spec() -> Dict[str, object]:
                     "responses": {
                         "200": {
                             "description": "Current mock mode state",
-                            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/MockModeResponse"}}},
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "$ref": "#/components/schemas/MockModeResponse"
+                                    }
+                                }
+                            },
                         }
                     },
                 },
@@ -915,16 +1110,34 @@ def openapi_spec() -> Dict[str, object]:
                     "description": "When disabled, /api/current reads the latest SQLite row instead of generating a new sample.",
                     "requestBody": {
                         "required": True,
-                        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/MockModeRequest"}}},
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/MockModeRequest"
+                                }
+                            }
+                        },
                     },
                     "responses": {
                         "200": {
                             "description": "Mock mode updated",
-                            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/MockModeResponse"}}},
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "$ref": "#/components/schemas/MockModeResponse"
+                                    }
+                                }
+                            },
                         },
                         "400": {
                             "description": "Invalid mock mode payload",
-                            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}},
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "$ref": "#/components/schemas/ErrorResponse"
+                                    }
+                                }
+                            },
                         },
                     },
                 },
@@ -935,17 +1148,42 @@ def openapi_spec() -> Dict[str, object]:
                     "summary": "Get paginated sensor history",
                     "description": "Returns all SQLite sensor records through page/per_page pagination so the dashboard can browse the full history, not only the latest 20.",
                     "parameters": [
-                        {"name": "page", "in": "query", "schema": {"type": "integer", "default": 1, "minimum": 1}},
-                        {"name": "per_page", "in": "query", "schema": {"type": "integer", "default": 20, "minimum": 1, "maximum": 100}},
+                        {
+                            "name": "page",
+                            "in": "query",
+                            "schema": {"type": "integer", "default": 1, "minimum": 1},
+                        },
+                        {
+                            "name": "per_page",
+                            "in": "query",
+                            "schema": {
+                                "type": "integer",
+                                "default": 20,
+                                "minimum": 1,
+                                "maximum": 100,
+                            },
+                        },
                     ],
                     "responses": {
                         "200": {
                             "description": "Paginated sensor records from SQLite",
-                            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/HistoryResponse"}}},
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "$ref": "#/components/schemas/HistoryResponse"
+                                    }
+                                }
+                            },
                         },
                         "400": {
                             "description": "Invalid pagination query",
-                            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}},
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "$ref": "#/components/schemas/ErrorResponse"
+                                    }
+                                }
+                            },
                         },
                     },
                 }
@@ -957,7 +1195,11 @@ def openapi_spec() -> Dict[str, object]:
                     "responses": {
                         "200": {
                             "description": "Chart.js time-series data",
-                            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ChartData"}}},
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/ChartData"}
+                                }
+                            },
                         }
                     },
                 }
@@ -968,16 +1210,34 @@ def openapi_spec() -> Dict[str, object]:
                     "summary": "Send LED, buzzer, or door command",
                     "requestBody": {
                         "required": True,
-                        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ControlRequest"}}},
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ControlRequest"
+                                }
+                            }
+                        },
                     },
                     "responses": {
                         "200": {
                             "description": "Command accepted and persisted",
-                            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CommandResponse"}}},
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "$ref": "#/components/schemas/CommandResponse"
+                                    }
+                                }
+                            },
                         },
                         "400": {
                             "description": "Unknown command",
-                            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}},
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "$ref": "#/components/schemas/ErrorResponse"
+                                    }
+                                }
+                            },
                         },
                     },
                 }
@@ -988,12 +1248,22 @@ def openapi_spec() -> Dict[str, object]:
                     "summary": "Enable or disable auto mode",
                     "requestBody": {
                         "required": True,
-                        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AutoRequest"}}},
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/AutoRequest"}
+                            }
+                        },
                     },
                     "responses": {
                         "200": {
                             "description": "Auto mode state persisted",
-                            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CommandResponse"}}},
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "$ref": "#/components/schemas/CommandResponse"
+                                    }
+                                }
+                            },
                         }
                     },
                 }
@@ -1053,7 +1323,9 @@ def api_current():
 
     row = latest_sensor_row()
     if row is None:
-        return error_response("No sensor data available. POST /api/sensor-data first.", 404)
+        return error_response(
+            "No sensor data available. POST /api/sensor-data first.", 404
+        )
     return jsonify(row_to_public_record(row))
 
 
@@ -1061,7 +1333,16 @@ def api_current():
 def api_get_mock_mode():
     """Return whether mock sample generation is enabled."""
     state = get_system_state()
-    return jsonify({"mock_mode": bool(state["mock_mode"]), "message": "Mock mode is enabled" if state["mock_mode"] else "Mock mode is disabled"})
+    return jsonify(
+        {
+            "mock_mode": bool(state["mock_mode"]),
+            "message": (
+                "Mock mode is enabled"
+                if state["mock_mode"]
+                else "Mock mode is disabled"
+            ),
+        }
+    )
 
 
 @app.post("/api/mock-mode")
@@ -1077,7 +1358,13 @@ def api_set_mock_mode():
         return error_response(str(exc))
 
     update_system_state({"mock_mode": mock_mode})
-    return jsonify({"success": True, "mock_mode": mock_mode, "message": "Mock mode enabled" if mock_mode else "Mock mode disabled"})
+    return jsonify(
+        {
+            "success": True,
+            "mock_mode": mock_mode,
+            "message": "Mock mode enabled" if mock_mode else "Mock mode disabled",
+        }
+    )
 
 
 @app.post("/api/sensor-data")
@@ -1095,7 +1382,13 @@ def api_sensor_data():
 
     update_system_state({**state_updates, "mock_mode": False})
     stored_record = insert_sensor_record(record)
-    return jsonify({"success": True, "message": "Sensor data saved", "data": row_to_public_record(stored_record)})
+    return jsonify(
+        {
+            "success": True,
+            "message": "Sensor data saved",
+            "data": row_to_public_record(stored_record),
+        }
+    )
 
 
 @app.post("/api/clear-data")
@@ -1120,7 +1413,11 @@ def api_clear_data():
     return jsonify(
         {
             "success": True,
-            "message": "All sensor records cleared" if not reset_state else "All sensor records cleared and system state reset",
+            "message": (
+                "All sensor records cleared"
+                if not reset_state
+                else "All sensor records cleared and system state reset"
+            ),
             "deleted_records": deleted_count,
             "reset_state": reset_state,
         }
@@ -1179,7 +1476,10 @@ def api_control():
     }
 
     if command not in command_map:
-        return jsonify({"success": False, "message": f"Unknown command: {command}"}), 400
+        return (
+            jsonify({"success": False, "message": f"Unknown command: {command}"}),
+            400,
+        )
 
     key, value = command_map[command]
     update_system_state({key: value})
@@ -1219,8 +1519,9 @@ init_db()
 
 if __name__ == "__main__":
     # host="0.0.0.0" lets the dashboard be reached from another device on the
-    # Raspberry Pi network: http://RASPBERRY_PI_IP:5000
-    # Default port is 5000 as requested. If macOS AirPlay/Control Center already
-    # uses port 5000 during local development, run:
-    # APP_PORT=5001 python app.py
-    app.run(host=APP_HOST, port=APP_PORT, debug=APP_DEBUG)
+    # Raspberry Pi network: http://RASPBERRY_PI_IP:5001
+    # Default port is 5001. If another process already uses port 5001, run:
+    # APP_PORT=5002 python app.py
+    app.run(
+        host=APP_HOST, port=APP_PORT, debug=APP_DEBUG, threaded=True, use_reloader=False
+    )
