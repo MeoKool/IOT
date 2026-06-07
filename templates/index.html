@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Smart Room Monitoring & Control IoT dashboard mock UI">
+    <title>Smart Room Monitoring & Control</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="app-shell">
+        <nav class="top-nav" aria-label="Dashboard navigation">
+            <a class="brand-lockup" href="/" aria-label="Smart Room dashboard home">
+                <span class="brand-mark">SR</span>
+                <span>
+                    <strong>Smart Room</strong>
+                    <small>Monitoring &amp; Control</small>
+                </span>
+            </a>
+            <div class="nav-actions">
+                <a href="/docs" class="utility-link"><i data-lucide="book-open" aria-hidden="true"></i> API Docs</a>
+                <span class="status-chip"><i data-lucide="database" aria-hidden="true"></i> Flask + SQLite</span>
+            </div>
+        </nav>
+
+        <header class="hero">
+            <span class="sticker sticker--sky" aria-hidden="true"><i data-lucide="thermometer"></i></span>
+            <span class="sticker sticker--pink" aria-hidden="true"><i data-lucide="lightbulb"></i></span>
+            <span class="sticker sticker--green" aria-hidden="true"><i data-lucide="door-open"></i></span>
+            <span class="sticker sticker--orange" aria-hidden="true"><i data-lucide="settings-2"></i></span>
+
+            <div class="hero__content">
+                <div class="eyebrow">IoT Final Project Dashboard</div>
+                <h1>Smart Room Monitoring &amp; Control</h1>
+                <p>Real-time IoT Room Dashboard for sensor records, device controls, charts, and system status.</p>
+            </div>
+
+            <div class="connection-card" aria-label="Connection status">
+                <span class="pulse-dot" aria-hidden="true"></span>
+                <i class="connection-icon" data-lucide="bluetooth-connected" aria-hidden="true"></i>
+                <div>
+                    <strong id="connectionBadge">Bluetooth Connected</strong>
+                    <span>Last updated: <time id="lastUpdated">--</time></span>
+                </div>
+            </div>
+        </header>
+
+        <main>
+            <section class="section-block" aria-labelledby="sensorTitle">
+                <div class="section-heading">
+                    <div>
+                        <span class="section-kicker">Live sensors</span>
+                        <h2 id="sensorTitle">Real-time room data</h2>
+                    </div>
+                    <span class="refresh-pill">Auto refresh: {{ refresh_interval_seconds|int if refresh_interval_seconds == refresh_interval_seconds|int else refresh_interval_seconds }}s</span>
+                </div>
+
+                <div class="sensor-grid" id="sensorGrid">
+                    <article class="sensor-card" data-card="temperature">
+                        <div class="sensor-card__icon"><i data-lucide="thermometer" aria-hidden="true"></i></div>
+                        <div class="sensor-card__body">
+                            <span class="sensor-card__label">Temperature</span>
+                            <strong><span id="temperatureValue">--</span><small>°C</small></strong>
+                            <span id="temperatureStatus" class="sensor-card__status">Waiting for data</span>
+                        </div>
+                    </article>
+
+                    <article class="sensor-card" data-card="humidity">
+                        <div class="sensor-card__icon"><i data-lucide="droplets" aria-hidden="true"></i></div>
+                        <div class="sensor-card__body">
+                            <span class="sensor-card__label">Humidity</span>
+                            <strong><span id="humidityValue">--</span><small>%</small></strong>
+                            <span id="humidityStatus" class="sensor-card__status">Waiting for data</span>
+                        </div>
+                    </article>
+
+                    <article class="sensor-card" data-card="light">
+                        <div class="sensor-card__icon"><i data-lucide="lightbulb" aria-hidden="true"></i></div>
+                        <div class="sensor-card__body">
+                            <span class="sensor-card__label">Light Level</span>
+                            <strong><span id="lightValue">--</span></strong>
+                            <span id="lightStatus" class="sensor-card__status">Waiting for data</span>
+                        </div>
+                    </article>
+
+                    <article class="sensor-card" data-card="distance">
+                        <div class="sensor-card__icon"><i data-lucide="ruler" aria-hidden="true"></i></div>
+                        <div class="sensor-card__body">
+                            <span class="sensor-card__label">Distance</span>
+                            <strong><span id="distanceValue">--</span><small>cm</small></strong>
+                            <span id="distanceStatus" class="sensor-card__status">Waiting for data</span>
+                        </div>
+                    </article>
+
+                    <article class="sensor-card" data-card="door">
+                        <div class="sensor-card__icon"><i data-lucide="door-open" aria-hidden="true"></i></div>
+                        <div class="sensor-card__body">
+                            <span class="sensor-card__label">Door Status</span>
+                            <strong id="doorValue">--</strong>
+                            <span id="doorStatus" class="sensor-card__status">Servo door mock state</span>
+                        </div>
+                    </article>
+
+                    <article class="sensor-card" data-card="led">
+                        <div class="sensor-card__icon"><i data-lucide="lamp-desk" aria-hidden="true"></i></div>
+                        <div class="sensor-card__body">
+                            <span class="sensor-card__label">LED Status</span>
+                            <strong id="ledValue">--</strong>
+                            <span id="ledStatus" class="sensor-card__status">LED output mock state</span>
+                        </div>
+                    </article>
+
+                    <article class="sensor-card" data-card="buzzer">
+                        <div class="sensor-card__icon"><i data-lucide="bell-ring" aria-hidden="true"></i></div>
+                        <div class="sensor-card__body">
+                            <span class="sensor-card__label">Buzzer Status</span>
+                            <strong id="buzzerValue">--</strong>
+                            <span id="buzzerStatus" class="sensor-card__status">Buzzer output mock state</span>
+                        </div>
+                    </article>
+
+                    <article class="sensor-card" data-card="auto">
+                        <div class="sensor-card__icon"><i data-lucide="settings-2" aria-hidden="true"></i></div>
+                        <div class="sensor-card__body">
+                            <span class="sensor-card__label">Auto Mode</span>
+                            <strong id="autoValue">--</strong>
+                            <span id="autoStatus" class="sensor-card__status">System automation mode</span>
+                        </div>
+                    </article>
+                </div>
+            </section>
+
+            <section class="dashboard-grid">
+                <div class="panel control-panel" aria-labelledby="controlTitle">
+                    <div class="section-heading compact">
+                        <div>
+                            <span class="section-kicker">Controls</span>
+                            <h2 id="controlTitle">Device control panel</h2>
+                        </div>
+                    </div>
+
+                    <div class="control-grid toggle-grid">
+                        <label class="control-toggle" for="ledToggle">
+                            <input id="ledToggle" type="checkbox" data-toggle-control="led">
+                            <span class="toggle-switch" aria-hidden="true"></span>
+                            <span class="toggle-copy">
+                                <strong><i data-lucide="lamp-desk" aria-hidden="true"></i> LED</strong>
+                                <small id="ledToggleText">Lighting output</small>
+                            </span>
+                        </label>
+
+                        <label class="control-toggle" for="buzzerToggle">
+                            <input id="buzzerToggle" type="checkbox" data-toggle-control="buzzer">
+                            <span class="toggle-switch" aria-hidden="true"></span>
+                            <span class="toggle-copy">
+                                <strong><i data-lucide="bell-ring" aria-hidden="true"></i> Buzzer</strong>
+                                <small id="buzzerToggleText">Alert sound</small>
+                            </span>
+                        </label>
+
+                        <label class="control-toggle" for="doorToggle">
+                            <input id="doorToggle" type="checkbox" data-toggle-control="door">
+                            <span class="toggle-switch" aria-hidden="true"></span>
+                            <span class="toggle-copy">
+                                <strong><i data-lucide="door-open" aria-hidden="true"></i> Door</strong>
+                                <small id="doorToggleText">Servo position</small>
+                            </span>
+                        </label>
+
+                        <label class="control-toggle" for="autoToggle">
+                            <input id="autoToggle" type="checkbox" data-toggle-control="auto">
+                            <span class="toggle-switch" aria-hidden="true"></span>
+                            <span class="toggle-copy">
+                                <strong><i data-lucide="settings-2" aria-hidden="true"></i> Auto Mode</strong>
+                                <small id="autoToggleText">Automation mode</small>
+                            </span>
+                        </label>
+                    </div>
+
+                    <p class="helper-text">Toggles update SQLite and publish JSON commands to MQTT topic <strong>room/control</strong>. The Raspberry Pi bridge can forward the included Arduino code to Bluetooth/Serial.</p>
+                </div>
+
+                <aside class="panel system-panel" aria-labelledby="systemTitle">
+                    <div class="section-heading compact">
+                        <div>
+                            <span class="section-kicker">System</span>
+                            <h2 id="systemTitle">Status overview</h2>
+                        </div>
+                    </div>
+
+                    <dl class="system-list">
+                        <div><dt>Communication method</dt><dd>Bluetooth + MQTT</dd></div>
+                        <div><dt>Bluetooth port</dt><dd>/dev/rfcomm0</dd></div>
+                        <div><dt>MQTT broker</dt><dd id="mqttBroker">127.0.0.1:1883</dd></div>
+                        <div><dt>MQTT status</dt><dd><span id="mqttStatusBadge" class="badge badge-off">Offline</span></dd></div>
+                        <div><dt>Data topic</dt><dd id="mqttDataTopic">room/data</dd></div>
+                        <div><dt>Control topic</dt><dd id="mqttControlTopic">room/control</dd></div>
+                        <div><dt>Database</dt><dd>SQLite</dd></div>
+                        <div><dt>Backend</dt><dd>Flask</dd></div>
+                        <div><dt>Update interval</dt><dd>3 seconds</dd></div>
+                        <div><dt>System mode</dt><dd><span id="systemModeBadge" class="badge badge-on">Auto</span></dd></div>
+                    </dl>
+                </aside>
+            </section>
+
+            <section class="section-block" aria-labelledby="chartTitle">
+                <div class="section-heading">
+                    <div>
+                        <span class="section-kicker">Analytics</span>
+                        <h2 id="chartTitle">Live sensor charts</h2>
+                    </div>
+                    <span class="refresh-pill">Latest 20 points</span>
+                </div>
+
+                <div class="chart-grid">
+                    <article class="panel chart-card">
+                        <h3>Temperature</h3>
+                        <div class="chart-frame">
+                            <canvas id="temperatureChart"></canvas>
+                        </div>
+                    </article>
+                    <article class="panel chart-card">
+                        <h3>Humidity</h3>
+                        <div class="chart-frame">
+                            <canvas id="humidityChart"></canvas>
+                        </div>
+                    </article>
+                    <article class="panel chart-card">
+                        <h3>Light Level</h3>
+                        <div class="chart-frame">
+                            <canvas id="lightChart"></canvas>
+                        </div>
+                    </article>
+                    <article class="panel chart-card">
+                        <h3>Distance</h3>
+                        <div class="chart-frame">
+                            <canvas id="distanceChart"></canvas>
+                        </div>
+                    </article>
+                </div>
+            </section>
+
+            <section class="section-block" aria-labelledby="historyTitle">
+                <div class="section-heading history-heading">
+                    <div>
+                        <span class="section-kicker">Records</span>
+                        <h2 id="historyTitle">Sensor history</h2>
+                    </div>
+                    <div class="history-tools" aria-label="History pagination controls">
+                        <span id="historySummary" class="refresh-pill">Loading records...</span>
+                        <label class="page-size-control" for="historyPageSize">
+                            <span>Rows</span>
+                            <select id="historyPageSize" aria-label="Rows per page">
+                                <option value="10">10</option>
+                                <option value="20" selected>20</option>
+                                <option value="50">50</option>
+                                <option value="100">100</option>
+                            </select>
+                        </label>
+                    </div>
+                </div>
+
+                <div class="panel table-panel">
+                    <div class="table-wrap">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Time</th>
+                                    <th>Temperature</th>
+                                    <th>Humidity</th>
+                                    <th>Light</th>
+                                    <th>Distance</th>
+                                    <th>Door</th>
+                                    <th>LED</th>
+                                    <th>Buzzer</th>
+                                    <th>Auto</th>
+                                </tr>
+                            </thead>
+                            <tbody id="historyBody">
+                                <tr><td colspan="9" class="empty-state">Loading history...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <div class="pagination-bar" aria-label="Sensor history pagination">
+                        <button id="historyPrev" class="pagination-btn" type="button">← Previous</button>
+                        <span id="historyPageInfo" class="pagination-info">Page 1 / 1</span>
+                        <button id="historyNext" class="pagination-btn" type="button">Next →</button>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <div id="toastContainer" class="toast-container" aria-live="polite" aria-atomic="true"></div>
+
+    <script>
+        window.DASHBOARD_CONFIG = {
+            refreshIntervalMs: {{ refresh_interval_ms|tojson }},
+            maxChartPoints: {{ chart_max_points|tojson }},
+            historyDefaultPerPage: {{ history_default_per_page|tojson }}
+        };
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
